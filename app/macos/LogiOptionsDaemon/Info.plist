@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.logioptions.daemon</string>
+	<key>CFBundleName</key>
+	<string>LogiOptionsDaemon</string>
+	<key>CFBundleDisplayName</key>
+	<string>LogiOptions Daemon</string>
+	<key>CFBundleExecutable</key>
+	<string>LogiOptionsDaemon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>LogiOptions needs to send system shortcuts (Spaces, Mission Control) via System Events.</string>
+</dict>
+</plist>
