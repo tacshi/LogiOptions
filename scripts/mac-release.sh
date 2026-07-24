@@ -337,7 +337,6 @@ $notes
 ## System requirements
 
 - macOS 13+ on Apple Silicon or Intel
-- MX Master 3S over Bolt or BLE
 EOF
 
   local -a gh_args=(

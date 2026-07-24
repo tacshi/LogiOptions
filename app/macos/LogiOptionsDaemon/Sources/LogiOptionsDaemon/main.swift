@@ -36,4 +36,6 @@ Permissions.requestForDaemon()
 // If the user enabled “Start at login”, re-load the LaunchAgent after a manual
 // Stop (stopSession bootouts the job but keeps the plist).
 LoginAgent.ensureLoadedWithCurrentBinary()
-Daemon().run()
+// Strong local keeps Daemon.shared (weak) alive for the process lifetime.
+let daemon = Daemon()
+daemon.run()

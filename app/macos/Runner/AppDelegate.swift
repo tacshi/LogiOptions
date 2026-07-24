@@ -114,7 +114,7 @@ class AppDelegate: FlutterAppDelegate {
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
     let pathBytes = path.utf8CString
-    withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
+    _ = withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
       pathBytes.withUnsafeBufferPointer { buf in
         memcpy(ptr, buf.baseAddress!, min(buf.count, 104))
       }

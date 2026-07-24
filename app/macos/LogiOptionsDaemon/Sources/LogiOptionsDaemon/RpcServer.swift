@@ -26,9 +26,9 @@ final class RpcServer {
         guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
             throw RpcError.pathTooLong
         }
-        withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
+        _ = withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
             pathBytes.withUnsafeBufferPointer { buf in
-                memcpy(ptr, buf.baseAddress!, buf.count)
+                memcpy(ptr, buf.baseAddress!, min(buf.count, 104))
             }
         }
 
