@@ -17,14 +17,21 @@ final class ScrollEngine {
 
     /// From HIRES_WHEEL capabilities (typically 8): counts per ratchet notch.
     var hiresMultiplier: Double = 8
-    /// From THUMB_WHEEL getInfo diverted resolution.
+    /// From THUMB_WHEEL getInfo diverted resolution (counts per full revolution).
+    /// MX Master 3S reports native≈18, diverted≈120 when diverted.
     var thumbDivertedRes: Double = 48
 
     private var vertRemainder: Double = 0
     private var horizRemainder: Double = 0
 
-    /// Pixels per full ratchet/notch at speed = 1.0.
+    /// Pixels per MagSpeed ratchet notch at vertical speed = 1.0.
     private let pixelsPerNotch: Double = 40
+    /// Pixels for one full physical thumb-wheel revolution at thumb speed = 1.0.
+    ///
+    /// Must not reuse `pixelsPerNotch`: divertedRes is ~120 counts/rev, so
+    /// `rotation/res * 40` only moves ~40 px per full turn (80 px at 200%) —
+    /// far too slow. Options+ is closer to several hundred px per revolution.
+    private let thumbPixelsPerRevolution: Double = 720
 
     /// Vertical MagSpeed / hi-res wheel movement (`deltaV` from 0x2121).
     func injectVertical(deltaV: Int16) {
@@ -54,9 +61,11 @@ final class ScrollEngine {
     /// Thumb wheel rotation from 0x2150 (already host-diverted).
     func injectThumb(rotation: Int16) {
         guard rotation != 0 else { return }
+        // `thumbDivertedRes` = counts per full revolution while diverted.
         let res = max(thumbDivertedRes, 1)
         // Match vertical sign convention for “natural” feel on macOS.
-        var pixels = -Double(rotation) / res * thumbSpeed * pixelsPerNotch
+        var pixels =
+            -Double(rotation) / res * thumbSpeed * thumbPixelsPerRevolution
         if invertThumb { pixels = -pixels }
         // Already horizontal — Shift would only confuse axis handling.
         postPixel(
