@@ -28,14 +28,14 @@ class PointScrollPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return ListView(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(16),
       children: [
         Text('Pointer', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 12),
+        const SizedBox(height: 8),
         Card(
           elevation: 0,
           child: Padding(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -54,35 +54,27 @@ class PointScrollPage extends StatelessWidget {
                   label: '${state.dpi}',
                   onChanged: (v) => onDpiChanged(v.round()),
                 ),
-                Text(
-                  'Sensor sensitivity (on-device). Applied via HID++.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
               ],
             ),
           ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
         Text('MagSpeed wheel', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 12),
+        const SizedBox(height: 8),
         Card(
           elevation: 0,
           child: Column(
             children: [
               SwitchListTile(
+                dense: true,
                 title: const Text('SmartShift'),
-                subtitle: const Text(
-                  'Auto switch ratchet ↔ free-spin by speed',
-                ),
                 value: state.smartShiftEnabled,
                 onChanged: (v) =>
                     onSmartShiftChanged(v, state.smartShiftThreshold),
               ),
               if (state.smartShiftEnabled)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -106,16 +98,14 @@ class PointScrollPage extends StatelessWidget {
                   ),
                 ),
               SwitchListTile(
+                dense: true,
                 title: const Text('High-resolution scroll'),
-                subtitle: const Text(
-                  'Host-smoothed steps (Options+ style). Off = OS default.',
-                ),
                 value: state.hiresWheel,
                 onChanged: onHiresChanged,
               ),
               if (state.hiresWheel)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -134,16 +124,11 @@ class PointScrollPage extends StatelessWidget {
                         label: '${(state.scrollSpeed * 100).round()}%',
                         onChanged: onScrollSpeed,
                       ),
-                      Text(
-                        'Host scroll scale. Default 100%, up to 200%.',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
                     ],
                   ),
                 ),
               SwitchListTile(
+                dense: true,
                 title: const Text('Invert vertical wheel'),
                 value: state.invertWheel,
                 onChanged: onInvertWheel,
@@ -151,19 +136,15 @@ class PointScrollPage extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
         Text('Thumb wheel', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 12),
+        const SizedBox(height: 8),
         Card(
           elevation: 0,
           child: Column(
             children: [
-              const ListTile(
-                title: Text('Action'),
-                subtitle: Text('Horizontal scroll (diverted via daemon)'),
-              ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -182,16 +163,11 @@ class PointScrollPage extends StatelessWidget {
                       label: '${(state.thumbSpeed * 100).round()}%',
                       onChanged: onThumbSpeed,
                     ),
-                    Text(
-                      'Thumb scroll scale. Default 100%, up to 200%.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
                   ],
                 ),
               ),
               SwitchListTile(
+                dense: true,
                 title: const Text('Invert thumb wheel'),
                 value: state.thumbInvert,
                 onChanged: onThumbInvert,

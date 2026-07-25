@@ -94,8 +94,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             accessibilityTrusted: nativePerms.accessibility,
             inputMonitoringTrusted: nativePerms.inputMonitoring,
           );
-          _error =
-              'Daemon offline — quit and reopen LogiOptions.app (or run tools/run_daemon.sh)';
+          _error = 'Daemon offline — reopen LogiOptions.app';
         });
         return;
       }
@@ -204,10 +203,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Stop background daemon?'),
+        title: const Text('Stop daemon?'),
         content: const Text(
-          'Remaps, gestures, and host-controlled scroll will stop. '
-          'Native scroll is restored. Use Start in Settings to run the daemon again.',
+          'Remaps and host scroll will stop. Native scroll is restored.',
         ),
         actions: [
           TextButton(
@@ -216,7 +214,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           ),
           FilledButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Stop daemon'),
+            child: const Text('Stop'),
           ),
         ],
       ),
@@ -246,9 +244,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     if (!ok) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Could not start the daemon. Check Helpers/LogiOptionsDaemon in the app bundle.',
-          ),
+          content: Text('Could not start the daemon.'),
         ),
       );
     }
@@ -375,8 +371,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             if (_state.optionsPlusRunning)
               MaterialBanner(
                 content: const Text(
-                  'Official Logi Options+ is running and will conflict. '
-                  'Run tools/stop_options_plus.sh',
+                  'Logi Options+ is running and will conflict.',
                 ),
                 actions: [
                   TextButton(
@@ -390,7 +385,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                 color: Theme.of(context).colorScheme.errorContainer,
                 child: Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: Text(
                     _error!,
                     style: TextStyle(
@@ -433,9 +428,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   String _permissionMessage() {
-    return 'Enable Accessibility for LogiOptions and LogiOptionsDaemon so '
-        'remaps, Spaces gestures, and host scroll work. Turn both toggles on '
-        'in System Settings → Privacy & Security → Accessibility, then return '
-        'here — the banner clears automatically.';
+    return 'Enable Accessibility for LogiOptions and LogiOptionsDaemon '
+        '(System Settings → Privacy & Security → Accessibility).';
   }
 }

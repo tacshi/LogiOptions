@@ -26,30 +26,30 @@ class DeviceHeader extends StatelessWidget {
       child: SafeArea(
         bottom: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
           child: Row(
             children: [
               _DeviceAvatar(connected: state.connected),
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       title,
-                      style: theme.textTheme.titleLarge?.copyWith(
+                      style: theme.textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      state.connected
-                          ? connectionLabel
-                          : 'Connect a supported Logitech mouse (BLE or Bolt)',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
+                    if (state.connected) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        connectionLabel,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -57,7 +57,7 @@ class DeviceHeader extends StatelessWidget {
                 percent: state.batteryPercent,
                 charging: state.charging,
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               _StatusDot(
                 ok: state.daemonOnline,
                 label: state.daemonOnline ? 'Daemon' : 'No daemon',
@@ -80,19 +80,18 @@ class _DeviceAvatar extends StatelessWidget {
     final theme = Theme.of(context);
     // Portrait device art — use a taller tile + contain so the mouse is not cropped.
     return Container(
-      width: 52,
-      height: 64,
-      padding: const EdgeInsets.all(4),
+      width: 44,
+      height: 52,
+      padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.65),
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
         ),
       ),
       child: Image.asset(
         connected
-            // Full-body product render (not crop-heavy side art).
             ? 'assets/devices/mx_master_3s/front_core.png'
             : 'assets/brand/logi_logo.png',
         fit: BoxFit.contain,
@@ -103,7 +102,7 @@ class _DeviceAvatar extends StatelessWidget {
           errorBuilder: (_, __, ___) => Icon(
             Icons.mouse,
             color: theme.colorScheme.onPrimaryContainer,
-            size: 30,
+            size: 26,
           ),
         ),
       ),
