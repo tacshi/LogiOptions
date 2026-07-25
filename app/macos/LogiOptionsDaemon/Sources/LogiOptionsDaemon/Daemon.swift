@@ -58,6 +58,8 @@ final class Daemon {
 
         // Connect AFTER the main run loop is spinning so HID++ replies can be delivered.
         DispatchQueue.main.async { [weak self] in
+            // Warm System Events scripts off the critical path (first Space switch).
+            self?.engine.prepare()
             self?.checkOptionsPlus()
             self?.connectDevice()
             self?.refreshStatusCache(light: false)

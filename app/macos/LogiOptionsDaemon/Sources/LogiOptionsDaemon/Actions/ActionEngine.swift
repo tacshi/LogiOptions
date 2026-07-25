@@ -6,6 +6,16 @@ import Foundation
 final class ActionEngine {
     weak var features: MxFeaturesBox?
 
+    /// Serial queue for System Events injects. NSAppleScript is not thread-safe;
+    /// work stays off the HID/main path so gesture tracking is never blocked.
+    private let systemEventsQueue = DispatchQueue(
+        label: "logioptions.systemevents",
+        qos: .userInteractive
+    )
+    /// Compiled scripts — avoids forking `/usr/bin/osascript` (~150 ms) per gesture.
+    private var systemEventsScripts: [String: NSAppleScript] = [:]
+    private var systemEventsWarmed = false
+
     func execute(_ action: ActionSpec) {
         switch action {
         case .none:
@@ -23,6 +33,13 @@ final class ActionEngine {
         case .gesture:
             // Nested gesture specs are handled by GestureTracker
             break
+        }
+    }
+
+    /// Pre-compile System Events scripts so the first Space switch is warm.
+    func prepare() {
+        systemEventsQueue.async { [weak self] in
+            self?.warmSystemEvents()
         }
     }
 
@@ -167,40 +184,24 @@ final class ActionEngine {
 
     /// Switch macOS Spaces (Options+ does this via its privileged agent).
     ///
-    /// CGEvent Ctrl+Arrow often lands in the focused app (our Flutter nav bar).
-    /// System Events injects at the session level. Off main/HID thread.
+    /// System Events at session level keeps the system slide animation. Same
+    /// semantics as before — only the transport is faster: cached in-process
+    /// `NSAppleScript` on a background queue instead of spawning `osascript`
+    /// (~150 ms) every time. Gesture thresholds are unchanged.
     private func switchDesktop(next: Bool) {
         let keyCode = next ? 124 : 123
-        let ax = Permissions.accessibilityTrusted()
-        DaemonLog.info("switchDesktop next=\(next) ax=\(ax)")
-        let script =
-            "tell application \"System Events\" to key code \(keyCode) using control down"
-        DispatchQueue.global(qos: .userInteractive).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            task.arguments = ["-e", script]
-            task.standardOutput = FileHandle.nullDevice
-            let errPipe = Pipe()
-            task.standardError = errPipe
-            do {
-                try task.run()
-                task.waitUntilExit()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                let errText = String(data: errData, encoding: .utf8) ?? ""
-                if task.terminationStatus == 0 {
-                    DaemonLog.info("switchDesktop next=\(next) via System Events")
-                } else {
-                    DaemonLog.warn(
-                        "switchDesktop osascript status=\(task.terminationStatus) err=\(errText) — CGEvent fallback"
-                    )
-                    DispatchQueue.main.async {
-                        self.forceControlArrow(next: next)
-                    }
-                }
-            } catch {
-                DaemonLog.warn("switchDesktop failed: \(error)")
+        DaemonLog.info("switchDesktop next=\(next) scheduled")
+        systemEventsKey(code: keyCode, usingControl: true) { [weak self] ok, ms in
+            if ok {
+                DaemonLog.info(String(
+                    format: "switchDesktop next=%@ via System Events %.1fms",
+                    next ? "true" : "false",
+                    ms
+                ))
+            } else {
+                DaemonLog.warn("switchDesktop SE failed — CGEvent fallback")
                 DispatchQueue.main.async {
-                    self.forceControlArrow(next: next)
+                    self?.forceControlArrow(next: next)
                 }
             }
         }
@@ -321,26 +322,97 @@ final class ActionEngine {
     }
 
     /// Inject a key via System Events (session-level — same idea as Options+ agent).
-    private func systemEventsKey(code: Int, usingControl: Bool) {
+    ///
+    /// Always async on `systemEventsQueue`. Returns immediately to the caller so
+    /// gesture `fired` can be set without re-entrancy. Prefer cached NSAppleScript;
+    /// fall back to `osascript` Process only if AppleScript fails.
+    private func systemEventsKey(
+        code: Int,
+        usingControl: Bool,
+        completion: ((Bool, Double) -> Void)? = nil
+    ) {
+        systemEventsQueue.async { [weak self] in
+            guard let self else { return }
+            let t0 = CACurrentMediaTime()
+            let ok = self.runSystemEventsNow(code: code, usingControl: usingControl)
+            let ms = (CACurrentMediaTime() - t0) * 1000
+            if let completion {
+                completion(ok, ms)
+            } else if ok {
+                DaemonLog.info(String(
+                    format: "System Events keyCode=%d ctrl=%@ %.1fms",
+                    code,
+                    usingControl ? "true" : "false",
+                    ms
+                ))
+            } else {
+                DaemonLog.warn("System Events keyCode=\(code) failed")
+            }
+        }
+    }
+
+    /// Must run only on `systemEventsQueue`.
+    private func runSystemEventsNow(code: Int, usingControl: Bool) -> Bool {
+        warmSystemEvents()
+        let mods = usingControl ? " using control down" : ""
+        let source = "tell application \"System Events\" to key code \(code)\(mods)"
+
+        let script: NSAppleScript
+        if let cached = systemEventsScripts[source] {
+            script = cached
+        } else if let created = NSAppleScript(source: source) {
+            systemEventsScripts[source] = created
+            script = created
+        } else {
+            return runSystemEventsViaProcess(code: code, usingControl: usingControl)
+        }
+
+        var err: NSDictionary?
+        script.executeAndReturnError(&err)
+        if err == nil { return true }
+
+        DaemonLog.warn("NSAppleScript keyCode=\(code) err=\(err!) — osascript fallback")
+        return runSystemEventsViaProcess(code: code, usingControl: usingControl)
+    }
+
+    private func warmSystemEvents() {
+        guard !systemEventsWarmed else { return }
+        systemEventsWarmed = true
+        // Touch System Events once (Automation TCC) without injecting a key.
+        if let probe = NSAppleScript(source: "tell application \"System Events\" to get name") {
+            var err: NSDictionary?
+            probe.executeAndReturnError(&err)
+            if let err {
+                DaemonLog.warn("System Events warm probe: \(err)")
+            } else {
+                DaemonLog.info("System Events warm OK")
+            }
+        }
+        // Pre-compile the keys we use for Spaces / Mission Control / App Exposé.
+        for (code, ctrl) in [(123, true), (124, true), (125, true), (126, true), (103, false)] {
+            let mods = ctrl ? " using control down" : ""
+            let source = "tell application \"System Events\" to key code \(code)\(mods)"
+            if systemEventsScripts[source] == nil, let s = NSAppleScript(source: source) {
+                systemEventsScripts[source] = s
+            }
+        }
+    }
+
+    private func runSystemEventsViaProcess(code: Int, usingControl: Bool) -> Bool {
         let mods = usingControl ? " using control down" : ""
         let script = "tell application \"System Events\" to key code \(code)\(mods)"
-        DispatchQueue.global(qos: .userInteractive).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            task.arguments = ["-e", script]
-            task.standardOutput = FileHandle.nullDevice
-            task.standardError = FileHandle.nullDevice
-            do {
-                try task.run()
-                task.waitUntilExit()
-                if task.terminationStatus == 0 {
-                    DaemonLog.info("System Events keyCode=\(code) ctrl=\(usingControl)")
-                } else {
-                    DaemonLog.warn("System Events keyCode=\(code) status=\(task.terminationStatus)")
-                }
-            } catch {
-                DaemonLog.warn("System Events failed: \(error)")
-            }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            DaemonLog.warn("System Events Process failed: \(error)")
+            return false
         }
     }
 
