@@ -1,35 +1,38 @@
 #!/usr/bin/env bash
-# Build, Developer-ID-sign, notarize, package DMG, and publish to GitHub Releases.
+# Build release .app, Developer-ID-sign, notarize, package DMG under dist/,
+# and publish to GitHub Releases.
 #
-# Output under dist/:
+# Pattern: MonkeyT3ch/aSnap scripts/build-release.sh + mPDF scripts/signing.sh
+# Never ad-hoc. Requires Developer ID Application.
+#
+# Output:
 #   dist/LogiOptions.app
 #   dist/LogiOptions-<version>.dmg
 #   GitHub Release v<version> with the DMG attached (unless --no-upload)
 #
 # Required:
-#   DEVELOPER_ID_APPLICATION   e.g. "Developer ID Application: Name (TEAMID)"
-#   gh auth login              once, for GitHub Releases
-#
-# Notarization keychain profile (default name: LogiOptions):
-#   xcrun notarytool store-credentials LogiOptions \
-#     --apple-id you@example.com --team-id TEAMID --password 'app-specific-password'
+#   DEVELOPER_ID_APPLICATION   (or exactly one Developer ID cert in keychain)
+#   gh auth login              for GitHub Releases
+#   notarytool profile LogiOptions (or LOGIOPTIONS_NOTARY_PROFILE)
 #
 # Usage:
-#   export DEVELOPER_ID_APPLICATION="Developer ID Application: …"
 #   ./scripts/mac-release.sh
-#   ./scripts/mac-release.sh 1.2.0
-#   ./scripts/mac-release.sh --no-upload
+#   ./scripts/mac-release.sh 0.1.1
+#   ./scripts/mac-release.sh 0.1.1 --no-upload
 #   ./scripts/mac-release.sh --no-notarize --no-upload
-#   ./scripts/mac-release.sh --draft
 #   ./scripts/mac-release.sh --skip-build
+#   ./scripts/mac-release.sh --draft
 #
 # Optional env:
-#   GITHUB_REPO=owner/name     override origin remote
-#   LOGIOPTIONS_NOTARY_PROFILE override notary profile name
+#   GITHUB_REPO=owner/name
+#   LOGIOPTIONS_NOTARY_PROFILE  (default: LogiOptions)
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=signing.sh
+source "$ROOT/scripts/signing.sh"
+
 APP_DIR="$ROOT/app"
 DAEMON_DIR="$APP_DIR/macos/LogiOptionsDaemon"
 DIST_DIR="$ROOT/dist"
@@ -40,6 +43,7 @@ NOTARY_PROFILE="${LOGIOPTIONS_NOTARY_PROFILE:-LogiOptions}"
 ENTITLEMENTS="$APP_DIR/macos/Runner/Release.entitlements"
 PUBSPEC="$APP_DIR/pubspec.yaml"
 APP_DST="$DIST_DIR/${PRODUCT_NAME}.app"
+GITHUB_REPO_DEFAULT=""
 
 BUILD_NAME=""
 NO_NOTARIZE=false
@@ -62,13 +66,13 @@ trap cleanup EXIT
 need() {
   command -v "$1" >/dev/null 2>&1 || { echo "error: required command not found: $1" >&2; exit 1; }
 }
-log()  { echo "==> $*"; }
+log()  { echo ""; echo "==> $*"; }
 ok()   { echo "  [ok] $*"; }
 warn() { echo "  [warn] $*" >&2; }
 die()  { echo "error: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \?//'
+  sed -n '2,32p' "$0" | sed 's/^# \?//'
 }
 
 parse_pubspec_version() {
@@ -78,37 +82,15 @@ parse_pubspec_version() {
   echo "${line%%+*}"
 }
 
-resolve_identity() {
-  local requested="${DEVELOPER_ID_APPLICATION:-}"
-  local identities list count
-  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-
-  if [[ -z "$requested" ]]; then
-    # Auto-pick when exactly one Developer ID Application cert is present.
-    list="$(echo "$identities" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p')"
-    count="$(echo "$list" | grep -c . || true)"
-    if [[ "$count" == "1" ]]; then
-      requested="$(echo "$list" | head -n 1)"
-      warn "DEVELOPER_ID_APPLICATION unset; using sole keychain identity:"
-      warn "  $requested"
-    else
-      die "DEVELOPER_ID_APPLICATION is not set.
-
-  Export your signing identity, then re-run:
-    export DEVELOPER_ID_APPLICATION=\"Developer ID Application: Your Name (TEAMID)\"
-    ./scripts/mac-release.sh $BUILD_NAME
-
-  Available Developer ID Application identities:
-$(echo "$identities" | grep 'Developer ID Application' || echo '  (none found)')"
-    fi
+parse_pubspec_build_number() {
+  local line n
+  line="$(sed -n 's/^version:[[:space:]]*//p' "$PUBSPEC" | head -n 1 | tr -d "\"'\r")"
+  n="${line##*+}"
+  if [[ "$n" =~ ^[0-9]+$ ]]; then
+    echo "$n"
+  else
+    date +%Y%m%d%H%M
   fi
-
-  if [[ "$requested" =~ ^[[:xdigit:]]{40}$ ]]; then
-    grep -Fq "$requested" <<<"$identities" || die "identity hash not found in keychain"
-  elif ! grep -Fq "$requested" <<<"$identities"; then
-    die "DEVELOPER_ID_APPLICATION not found in keychain: $requested"
-  fi
-  echo "$requested"
 }
 
 resolve_github_repo() {
@@ -128,9 +110,8 @@ resolve_github_repo() {
 }
 
 generate_release_notes() {
-  # Notes since the previous v* tag (not including a tag we may be about to create).
-  local prev_tag notes version_arg="${1:-}"
-  local current_tag=""
+  local version_arg="${1:-}"
+  local current_tag="" prev_tag notes
   [[ -n "$version_arg" ]] && current_tag="v${version_arg}"
 
   prev_tag="$(
@@ -152,128 +133,6 @@ generate_release_notes() {
     notes='- Bug fixes and improvements'
   fi
   printf '%s\n' "$notes"
-}
-
-sign_app_bundle() {
-  local app_path="$1"
-  local identity="$2"
-  local frameworks_dir="$app_path/Contents/Frameworks"
-  local helpers_dir="$app_path/Contents/Helpers"
-  local signable
-
-  log "Signing nested code"
-  if [[ -d "$helpers_dir" ]]; then
-    while IFS= read -r signable; do
-      [[ -n "$signable" ]] || continue
-      echo "  sign $(basename "$signable")"
-      codesign --force --sign "$identity" \
-        --identifier "$BUNDLE_ID_DAEMON" \
-        --options runtime --timestamp \
-        "$signable"
-    done < <(
-      find "$helpers_dir" \
-        \( -type d \( -name '*.app' -o -name '*.framework' -o -name '*.xpc' \) \
-           -o -type f \( -perm -111 -o -name '*.dylib' \) \) \
-        | awk -F/ '{ print NF ":" $0 }' | sort -nr | cut -d: -f2-
-    )
-  fi
-  if [[ -d "$frameworks_dir" ]]; then
-    while IFS= read -r signable; do
-      [[ -n "$signable" ]] || continue
-      echo "  sign $(basename "$signable")"
-      codesign --force --sign "$identity" \
-        --options runtime --timestamp \
-        "$signable"
-    done < <(
-      find "$frameworks_dir" \
-        \( -type d \( -name '*.framework' -o -name '*.xpc' -o -name '*.app' \) \
-           -o -type f \( -name '*.dylib' -o -name '*.so' \) \) \
-        | awk -F/ '{ print NF ":" $0 }' | sort -nr | cut -d: -f2-
-    )
-  fi
-  if [[ -x "$app_path/Contents/MacOS/LogiOptionsDaemon" ]]; then
-    codesign --force --sign "$identity" \
-      --identifier "$BUNDLE_ID_DAEMON" \
-      --options runtime --timestamp \
-      "$app_path/Contents/MacOS/LogiOptionsDaemon"
-  fi
-  echo "  sign $(basename "$app_path")"
-  codesign --force --sign "$identity" \
-    --identifier "$BUNDLE_ID_APP" \
-    --entitlements "$ENTITLEMENTS" \
-    --options runtime --timestamp \
-    "$app_path"
-  codesign --verify --deep --strict --verbose=2 "$app_path"
-  ok "Signed $app_path"
-}
-
-sign_dmg() {
-  local dmg_path="$1"
-  local identity="$2"
-  log "Signing DMG"
-  codesign --force --timestamp --sign "$identity" "$dmg_path"
-  codesign --verify --strict --verbose=2 "$dmg_path"
-  ok "Signed DMG"
-}
-
-create_dmg() {
-  local app_path="$1"
-  local dmg_path="$2"
-  local staging
-  staging="$(mktemp -d "${TMPDIR:-/tmp}/logioptions-dmg.XXXXXX")"
-  CLEANUP_PATHS+=("$staging")
-  ditto "$app_path" "$staging/${PRODUCT_NAME}.app"
-  ln -s /Applications "$staging/Applications"
-  rm -f "$dmg_path"
-  if diskutil image create from --help >/dev/null 2>&1; then
-    diskutil image create from --volumeName "$PRODUCT_NAME" --format UDZO "$staging" "$dmg_path"
-  else
-    hdiutil create -volname "$PRODUCT_NAME" -srcfolder "$staging" -ov -format UDZO "$dmg_path"
-  fi
-  ok "Created $dmg_path"
-}
-
-notarize_and_staple() {
-  local app_path="$1"
-  local dmg_path="$2"
-  local submit_output submission_id
-
-  log "Notarizing with profile: $NOTARY_PROFILE"
-  if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
-    die "No notarytool profile '$NOTARY_PROFILE'. Run store-credentials or use --no-notarize"
-  fi
-
-  if ! submit_output=$(xcrun notarytool submit "$dmg_path" \
-      --keychain-profile "$NOTARY_PROFILE" --wait --output-format json 2>&1); then
-    echo "$submit_output" >&2
-    die "Notarization submission failed"
-  fi
-  if ! echo "$submit_output" | grep -q '"status"[[:space:]]*:[[:space:]]*"Accepted"'; then
-    echo "$submit_output" >&2
-    submission_id=$(echo "$submit_output" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-    if [[ -n "$submission_id" ]]; then
-      xcrun notarytool log "$submission_id" --keychain-profile "$NOTARY_PROFILE" >&2 || true
-    fi
-    die "Notarization was not accepted"
-  fi
-  ok "Notarization accepted"
-  xcrun stapler staple "$app_path"
-  xcrun stapler staple "$dmg_path"
-  xcrun stapler validate "$app_path"
-  xcrun stapler validate "$dmg_path"
-  ok "Stapled app and DMG"
-  # spctl can fail spuriously (network, TCC, offline) even after Accepted
-  # notarization — never block GitHub upload on it.
-  if spctl --assess --type exec --verbose=4 "$app_path" 2>&1; then
-    ok "Gatekeeper accepted app"
-  else
-    warn "spctl assess app failed (non-fatal; notarization already Accepted)"
-  fi
-  if spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path" 2>&1; then
-    ok "Gatekeeper accepted DMG"
-  else
-    warn "spctl assess DMG failed (non-fatal; notarization already Accepted)"
-  fi
 }
 
 embed_daemon_and_icon() {
@@ -318,15 +177,34 @@ embed_daemon_and_icon() {
   fi
 }
 
+create_dmg() {
+  local app_path="$1"
+  local dmg_path="$2"
+  local staging
+  staging="$(mktemp -d "${TMPDIR:-/tmp}/logioptions-dmg.XXXXXX")"
+  CLEANUP_PATHS+=("$staging")
+  ditto "$app_path" "$staging/${PRODUCT_NAME}.app"
+  ln -s /Applications "$staging/Applications"
+  rm -f "$dmg_path"
+  # Prefer hdiutil (aSnap); diskutil image create on newer macOS.
+  if hdiutil create -volname "$PRODUCT_NAME" -srcfolder "$staging" -ov -format UDZO "$dmg_path" >/dev/null; then
+    ok "Created $dmg_path"
+  elif diskutil image create from --volumeName "$PRODUCT_NAME" --format UDZO "$staging" "$dmg_path" 2>/dev/null; then
+    ok "Created $dmg_path (diskutil)"
+  else
+    die "Failed to create DMG at $dmg_path"
+  fi
+  [[ -f "$dmg_path" && -s "$dmg_path" ]] || die "DMG missing or empty: $dmg_path"
+}
+
 wait_for_remote_tag() {
   local repo="$1"
   local tag_name="$2"
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for i in $(seq 1 15); do
     if gh api "repos/${repo}/git/ref/tags/${tag_name}" >/dev/null 2>&1; then
       return 0
     fi
-    # Lightweight vs annotated: refs/tags/X may be an object; try list too.
     if git -C "$ROOT" ls-remote --tags origin "refs/tags/${tag_name}" 2>/dev/null | grep -q .; then
       return 0
     fi
@@ -349,17 +227,16 @@ publish_github_release() {
   head_commit="$(git -C "$ROOT" rev-parse HEAD)"
   notes="$(generate_release_notes "$version")"
 
-  log "Publishing GitHub release $tag_name to $repo (commit ${head_commit:0:8})"
+  log "Publishing GitHub release $tag_name → $repo (${head_commit:0:8})"
 
-  # Ensure annotated tag points at this build's commit, then push.
   if [[ "$NO_TAG" == "false" ]]; then
     if git -C "$ROOT" rev-parse --verify --quiet "refs/tags/$tag_name" >/dev/null; then
       local existing
       existing="$(git -C "$ROOT" rev-parse "refs/tags/$tag_name^{}")"
       if [[ "$existing" != "$head_commit" ]]; then
-        die "Local tag $tag_name points at ${existing:0:8}, not HEAD ${head_commit:0:8}. Delete it or bump the version."
+        die "Local tag $tag_name points at ${existing:0:8}, not HEAD ${head_commit:0:8}"
       fi
-      ok "Local tag $tag_name already at HEAD"
+      ok "Local tag $tag_name at HEAD"
     else
       git -C "$ROOT" tag -a "$tag_name" -m "Release $PRODUCT_NAME $version"
       ok "Created tag $tag_name"
@@ -367,14 +244,11 @@ publish_github_release() {
     if git -C "$ROOT" ls-remote --tags origin "refs/tags/$tag_name" 2>/dev/null | grep -q .; then
       ok "Remote tag $tag_name already on origin"
     else
-      log "Pushing tag $tag_name to origin"
       git -C "$ROOT" push origin "refs/tags/$tag_name:refs/tags/$tag_name"
       ok "Pushed tag $tag_name"
     fi
-    if ! wait_for_remote_tag "$repo" "$tag_name"; then
-      die "Tag $tag_name not visible on GitHub yet; try: git push origin $tag_name && re-run with --skip-build"
-    fi
-    ok "Tag $tag_name visible on GitHub"
+    wait_for_remote_tag "$repo" "$tag_name" \
+      || die "Tag $tag_name not visible on GitHub; push failed?"
   fi
 
   body_file="$(mktemp "${TMPDIR:-/tmp}/logioptions-notes.XXXXXX.md")"
@@ -399,48 +273,36 @@ $notes
 - macOS 13+ on Apple Silicon or Intel
 EOF
 
-  # Re-run friendly: update asset if the release already exists.
   if gh release view "$tag_name" --repo "$repo" >/dev/null 2>&1; then
-    log "Release $tag_name already exists — uploading DMG (clobber)"
+    log "Release $tag_name exists — uploading DMG (clobber)"
     gh release upload "$tag_name" "$dmg_path" --repo "$repo" --clobber
-    gh release edit "$tag_name" --repo "$repo" --notes-file "$body_file" \
+    gh release edit "$tag_name" --repo "$repo" \
+      --notes-file "$body_file" \
       --title "${PRODUCT_NAME} ${version}" || true
-    if [[ "$DRAFT_RELEASE" == "false" ]]; then
-      gh release edit "$tag_name" --repo "$repo" --draft=false 2>/dev/null || true
-    fi
+    [[ "$DRAFT_RELEASE" == "false" ]] \
+      && gh release edit "$tag_name" --repo "$repo" --draft=false 2>/dev/null || true
     ok "Updated https://github.com/${repo}/releases/tag/${tag_name}"
-    return
-  fi
-
-  local -a gh_args=(
-    release create "$tag_name"
-    --repo "$repo"
-    --title "${PRODUCT_NAME} ${version}"
-    --notes-file "$body_file"
-  )
-  if [[ "$DRAFT_RELEASE" == "true" ]]; then
-    gh_args+=(--draft)
-  fi
-  # Pin release to this commit. Prefer --target so we never tag the wrong branch
-  # if GitHub auto-creates a tag. When we already pushed the tag, --target still
-  # attaches the release to that tag object.
-  gh_args+=(--target "$head_commit")
-  gh_args+=("$dmg_path")
-
-  log "gh release create $tag_name"
-  if ! gh "${gh_args[@]}"; then
-    # Race: tag exists but create failed; try upload path once.
-    if gh release view "$tag_name" --repo "$repo" >/dev/null 2>&1; then
-      warn "release create raced; uploading asset to existing release"
-      gh release upload "$tag_name" "$dmg_path" --repo "$repo" --clobber
-    else
-      die "gh release create failed for $tag_name"
-    fi
+  else
+    local -a gh_args=(
+      release create "$tag_name"
+      --repo "$repo"
+      --title "${PRODUCT_NAME} ${version}"
+      --notes-file "$body_file"
+      --target "$head_commit"
+    )
+    [[ "$DRAFT_RELEASE" == "true" ]] && gh_args+=(--draft)
+    gh_args+=("$dmg_path")
+    log "gh release create $tag_name"
+    gh "${gh_args[@]}"
+    ok "Created https://github.com/${repo}/releases/tag/${tag_name}"
   fi
 
   gh release view "$tag_name" --repo "$repo" >/dev/null \
-    || die "Release $tag_name not found after create"
-  ok "GitHub release https://github.com/${repo}/releases/tag/${tag_name}"
+    || die "Release $tag_name not found after publish"
+  gh release view "$tag_name" --repo "$repo" --json assets --jq '.assets[].name' \
+    | grep -Fxq "$(basename "$dmg_path")" \
+    || die "DMG $(basename "$dmg_path") missing from release assets"
+  ok "GitHub release verified with DMG asset"
 }
 
 # --- args ---
@@ -453,9 +315,7 @@ while [[ $# -gt 0 ]]; do
     --draft) DRAFT_RELEASE=true; shift ;;
     --skip-build) SKIP_BUILD=true; shift ;;
     --clean) CLEAN=true; shift ;;
-    -*)
-      die "Unknown option: $1"
-      ;;
+    -*) die "Unknown option: $1" ;;
     *)
       [[ -z "$BUILD_NAME" ]] || die "Only one VERSION argument is supported"
       BUILD_NAME="$1"
@@ -471,7 +331,7 @@ need codesign
 need security
 need ditto
 need xcrun
-need spctl
+need hdiutil
 need git
 if [[ "$NO_UPLOAD" == "false" ]]; then
   need gh
@@ -487,7 +347,7 @@ if ! [[ "$BUILD_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
 fi
 
 DMG_PATH="$DIST_DIR/${PRODUCT_NAME}-${BUILD_NAME}.dmg"
-IDENTITY="$(resolve_identity)"
+IDENTITY="$(resolve_developer_id)"
 
 log "Release $PRODUCT_NAME $BUILD_NAME"
 echo "  identity: $IDENTITY"
@@ -497,23 +357,27 @@ echo "  dmg:      $DMG_PATH"
 if [[ "$NO_UPLOAD" == "false" ]]; then
   echo "  github:   $(resolve_github_repo)  tag=v${BUILD_NAME}"
 else
-  echo "  github:   skipped"
+  echo "  github:   skipped (--no-upload)"
 fi
 
-# --- build ---
+# --- 1. Build release .app ---
 if [[ "$SKIP_BUILD" == "false" ]]; then
   if [[ "$CLEAN" == "true" ]]; then
     log "flutter clean"
     (cd "$APP_DIR" && flutter clean)
   fi
 
-  log "Building LogiOptionsDaemon release"
+  log "1/5 Building LogiOptionsDaemon (release)"
   (cd "$DAEMON_DIR" && swift build -c release)
   DAEMON_BIN="$(cd "$DAEMON_DIR" && swift build -c release --show-bin-path)/LogiOptionsDaemon"
   [[ -x "$DAEMON_BIN" ]] || die "daemon binary missing at $DAEMON_BIN"
 
-  log "Building Flutter macOS release"
-  (cd "$APP_DIR" && flutter pub get && flutter build macos --release --build-name "$BUILD_NAME")
+  BUILD_NUMBER="$(parse_pubspec_build_number)"
+  log "1/5 Building Flutter macOS release (name=$BUILD_NAME number=$BUILD_NUMBER)"
+  (cd "$APP_DIR" && flutter pub get && \
+    flutter build macos --release \
+      --build-name "$BUILD_NAME" \
+      --build-number "$BUILD_NUMBER")
 
   APP_SRC=""
   for c in \
@@ -528,42 +392,65 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
   [[ -d "$APP_SRC" ]] || die "could not find Release .app"
 
   log "Assembling $APP_DST"
-  rm -rf "$DIST_DIR"
   mkdir -p "$DIST_DIR"
-  rsync -a --delete "$APP_SRC/" "$APP_DST/"
+  rm -rf "$APP_DST"
+  rsync -a "$APP_SRC/" "$APP_DST/"
   rm -f "$DIST_DIR/.DS_Store" 2>/dev/null || true
   embed_daemon_and_icon "$APP_DST" "$DAEMON_BIN"
+  ok "Release .app assembled"
 else
   [[ -d "$APP_DST" ]] || die "--skip-build requires existing $APP_DST"
-  log "Skipping build; re-signing existing app"
+  log "1/5 Skipping build; using existing $APP_DST"
 fi
 
-sign_app_bundle "$APP_DST" "$IDENTITY"
+# --- 2. Sign (Developer ID, never ad-hoc) ---
+log "2/5 Sign .app (Developer ID + hardened runtime)"
+sign_macos_app_bundle \
+  "$APP_DST" \
+  "$IDENTITY" \
+  "$ENTITLEMENTS" \
+  1 \
+  "$BUNDLE_ID_APP" \
+  "$BUNDLE_ID_DAEMON"
 
-log "Creating DMG"
+# --- 3. DMG ---
+log "3/5 Create + sign DMG → $DMG_PATH"
 create_dmg "$APP_DST" "$DMG_PATH"
-sign_dmg "$DMG_PATH" "$IDENTITY"
+sign_disk_image "$DMG_PATH" "$IDENTITY"
+ok "DMG $(du -h "$DMG_PATH" | awk '{print $1}')"
 
+# --- 4. Notarize ---
 if [[ "$NO_NOTARIZE" == "true" ]]; then
-  warn "Notarization skipped"
+  warn "4/5 Notarization skipped"
 else
-  notarize_and_staple "$APP_DST" "$DMG_PATH"
+  log "4/5 Notarize + staple"
+  if ! notary_profile_ok "$NOTARY_PROFILE"; then
+    die "Notary profile '$NOTARY_PROFILE' missing (unlike aSnap we do not silently skip).
+
+  xcrun notarytool store-credentials $NOTARY_PROFILE \\
+    --apple-id … --team-id … --password …
+  Or pass --no-notarize for a signed-only local DMG."
+  fi
+  notarize_and_staple "$DMG_PATH" "$APP_DST" "$NOTARY_PROFILE"
+  verify_gatekeeper "$APP_DST" app
+  verify_gatekeeper "$DMG_PATH" dmg
 fi
 
+# --- 5. GitHub Releases ---
 if [[ "$NO_UPLOAD" == "true" ]]; then
-  warn "GitHub upload skipped"
+  warn "5/5 GitHub upload skipped"
 else
+  log "5/5 Publish GitHub Release v${BUILD_NAME}"
   publish_github_release "$BUILD_NAME" "$DMG_PATH"
 fi
 
-log "Done"
-echo "  App: $APP_DST"
-echo "  DMG: $DMG_PATH"
+log "Done — release artifacts"
+echo "  App:     $APP_DST"
+echo "  DMG:     $DMG_PATH"
+refuse_adhoc_signature "$APP_DST"
 if [[ "$NO_UPLOAD" == "false" ]]; then
-  echo "  Release: https://github.com/$(resolve_github_repo)/releases/tag/v${BUILD_NAME}"
-  # Fail the script if the release still isn't on GitHub (catch silent gh issues).
-  if ! gh release view "v${BUILD_NAME}" --repo "$(resolve_github_repo)" >/dev/null 2>&1; then
-    die "Release v${BUILD_NAME} not found on GitHub after publish — check gh auth and network"
-  fi
+  REPO="$(resolve_github_repo)"
+  echo "  Release: https://github.com/${REPO}/releases/tag/v${BUILD_NAME}"
+  echo "  Asset:   https://github.com/${REPO}/releases/download/v${BUILD_NAME}/$(basename "$DMG_PATH")"
 fi
 ls -la "$DIST_DIR"
