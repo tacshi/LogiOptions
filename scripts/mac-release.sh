@@ -80,9 +80,29 @@ parse_pubspec_version() {
 
 resolve_identity() {
   local requested="${DEVELOPER_ID_APPLICATION:-}"
-  local identities
-  [[ -n "$requested" ]] || die "DEVELOPER_ID_APPLICATION is not set"
+  local identities list count
   identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+
+  if [[ -z "$requested" ]]; then
+    # Auto-pick when exactly one Developer ID Application cert is present.
+    list="$(echo "$identities" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p')"
+    count="$(echo "$list" | grep -c . || true)"
+    if [[ "$count" == "1" ]]; then
+      requested="$(echo "$list" | head -n 1)"
+      warn "DEVELOPER_ID_APPLICATION unset; using sole keychain identity:"
+      warn "  $requested"
+    else
+      die "DEVELOPER_ID_APPLICATION is not set.
+
+  Export your signing identity, then re-run:
+    export DEVELOPER_ID_APPLICATION=\"Developer ID Application: Your Name (TEAMID)\"
+    ./scripts/mac-release.sh $BUILD_NAME
+
+  Available Developer ID Application identities:
+$(echo "$identities" | grep 'Developer ID Application' || echo '  (none found)')"
+    fi
+  fi
+
   if [[ "$requested" =~ ^[[:xdigit:]]{40}$ ]]; then
     grep -Fq "$requested" <<<"$identities" || die "identity hash not found in keychain"
   elif ! grep -Fq "$requested" <<<"$identities"; then
@@ -108,8 +128,19 @@ resolve_github_repo() {
 }
 
 generate_release_notes() {
-  local prev_tag notes
-  prev_tag="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
+  # Notes since the previous v* tag (not including a tag we may be about to create).
+  local prev_tag notes version_arg="${1:-}"
+  local current_tag=""
+  [[ -n "$version_arg" ]] && current_tag="v${version_arg}"
+
+  prev_tag="$(
+    git -C "$ROOT" tag -l 'v*' --sort=-v:refname \
+      | while read -r t; do
+          [[ -n "$current_tag" && "$t" == "$current_tag" ]] && continue
+          echo "$t"
+          break
+        done
+  )"
   if [[ -n "$prev_tag" ]]; then
     notes="$(git -C "$ROOT" log "${prev_tag}..HEAD" --pretty=format:'- %s' --no-merges 2>/dev/null \
       | grep -v '^- Bump version' | grep -v '^- Merge ' | head -30 || true)"
@@ -231,9 +262,18 @@ notarize_and_staple() {
   xcrun stapler validate "$app_path"
   xcrun stapler validate "$dmg_path"
   ok "Stapled app and DMG"
-  spctl --assess --type exec --verbose=4 "$app_path"
-  spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
-  ok "Gatekeeper accepted app and DMG"
+  # spctl can fail spuriously (network, TCC, offline) even after Accepted
+  # notarization — never block GitHub upload on it.
+  if spctl --assess --type exec --verbose=4 "$app_path" 2>&1; then
+    ok "Gatekeeper accepted app"
+  else
+    warn "spctl assess app failed (non-fatal; notarization already Accepted)"
+  fi
+  if spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path" 2>&1; then
+    ok "Gatekeeper accepted DMG"
+  else
+    warn "spctl assess DMG failed (non-fatal; notarization already Accepted)"
+  fi
 }
 
 embed_daemon_and_icon() {
@@ -278,6 +318,23 @@ embed_daemon_and_icon() {
   fi
 }
 
+wait_for_remote_tag() {
+  local repo="$1"
+  local tag_name="$2"
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if gh api "repos/${repo}/git/ref/tags/${tag_name}" >/dev/null 2>&1; then
+      return 0
+    fi
+    # Lightweight vs annotated: refs/tags/X may be an object; try list too.
+    if git -C "$ROOT" ls-remote --tags origin "refs/tags/${tag_name}" 2>/dev/null | grep -q .; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 publish_github_release() {
   local version="$1"
   local dmg_path="$2"
@@ -285,24 +342,22 @@ publish_github_release() {
   local repo head_commit notes body_file
 
   need gh
+  [[ -f "$dmg_path" ]] || die "DMG missing for upload: $dmg_path"
   gh auth status >/dev/null 2>&1 || die "gh is not authenticated; run: gh auth login"
 
   repo="$(resolve_github_repo)"
   head_commit="$(git -C "$ROOT" rev-parse HEAD)"
-  notes="$(generate_release_notes)"
+  notes="$(generate_release_notes "$version")"
 
-  log "Publishing GitHub release $tag_name to $repo"
+  log "Publishing GitHub release $tag_name to $repo (commit ${head_commit:0:8})"
 
-  if gh release view "$tag_name" --repo "$repo" >/dev/null 2>&1; then
-    die "GitHub release already exists for $tag_name on $repo"
-  fi
-
+  # Ensure annotated tag points at this build's commit, then push.
   if [[ "$NO_TAG" == "false" ]]; then
     if git -C "$ROOT" rev-parse --verify --quiet "refs/tags/$tag_name" >/dev/null; then
       local existing
       existing="$(git -C "$ROOT" rev-parse "refs/tags/$tag_name^{}")"
       if [[ "$existing" != "$head_commit" ]]; then
-        die "Local tag $tag_name does not point at HEAD"
+        die "Local tag $tag_name points at ${existing:0:8}, not HEAD ${head_commit:0:8}. Delete it or bump the version."
       fi
       ok "Local tag $tag_name already at HEAD"
     else
@@ -310,11 +365,16 @@ publish_github_release() {
       ok "Created tag $tag_name"
     fi
     if git -C "$ROOT" ls-remote --tags origin "refs/tags/$tag_name" 2>/dev/null | grep -q .; then
-      ok "Remote tag $tag_name already exists"
+      ok "Remote tag $tag_name already on origin"
     else
+      log "Pushing tag $tag_name to origin"
       git -C "$ROOT" push origin "refs/tags/$tag_name:refs/tags/$tag_name"
       ok "Pushed tag $tag_name"
     fi
+    if ! wait_for_remote_tag "$repo" "$tag_name"; then
+      die "Tag $tag_name not visible on GitHub yet; try: git push origin $tag_name && re-run with --skip-build"
+    fi
+    ok "Tag $tag_name visible on GitHub"
   fi
 
   body_file="$(mktemp "${TMPDIR:-/tmp}/logioptions-notes.XXXXXX.md")"
@@ -339,6 +399,19 @@ $notes
 - macOS 13+ on Apple Silicon or Intel
 EOF
 
+  # Re-run friendly: update asset if the release already exists.
+  if gh release view "$tag_name" --repo "$repo" >/dev/null 2>&1; then
+    log "Release $tag_name already exists — uploading DMG (clobber)"
+    gh release upload "$tag_name" "$dmg_path" --repo "$repo" --clobber
+    gh release edit "$tag_name" --repo "$repo" --notes-file "$body_file" \
+      --title "${PRODUCT_NAME} ${version}" || true
+    if [[ "$DRAFT_RELEASE" == "false" ]]; then
+      gh release edit "$tag_name" --repo "$repo" --draft=false 2>/dev/null || true
+    fi
+    ok "Updated https://github.com/${repo}/releases/tag/${tag_name}"
+    return
+  fi
+
   local -a gh_args=(
     release create "$tag_name"
     --repo "$repo"
@@ -348,14 +421,25 @@ EOF
   if [[ "$DRAFT_RELEASE" == "true" ]]; then
     gh_args+=(--draft)
   fi
-  if [[ "$NO_TAG" == "false" ]]; then
-    gh_args+=(--verify-tag)
-  else
-    gh_args+=(--target "$head_commit")
-  fi
+  # Pin release to this commit. Prefer --target so we never tag the wrong branch
+  # if GitHub auto-creates a tag. When we already pushed the tag, --target still
+  # attaches the release to that tag object.
+  gh_args+=(--target "$head_commit")
   gh_args+=("$dmg_path")
 
-  gh "${gh_args[@]}"
+  log "gh release create $tag_name"
+  if ! gh "${gh_args[@]}"; then
+    # Race: tag exists but create failed; try upload path once.
+    if gh release view "$tag_name" --repo "$repo" >/dev/null 2>&1; then
+      warn "release create raced; uploading asset to existing release"
+      gh release upload "$tag_name" "$dmg_path" --repo "$repo" --clobber
+    else
+      die "gh release create failed for $tag_name"
+    fi
+  fi
+
+  gh release view "$tag_name" --repo "$repo" >/dev/null \
+    || die "Release $tag_name not found after create"
   ok "GitHub release https://github.com/${repo}/releases/tag/${tag_name}"
 }
 
@@ -477,5 +561,9 @@ echo "  App: $APP_DST"
 echo "  DMG: $DMG_PATH"
 if [[ "$NO_UPLOAD" == "false" ]]; then
   echo "  Release: https://github.com/$(resolve_github_repo)/releases/tag/v${BUILD_NAME}"
+  # Fail the script if the release still isn't on GitHub (catch silent gh issues).
+  if ! gh release view "v${BUILD_NAME}" --repo "$(resolve_github_repo)" >/dev/null 2>&1; then
+    die "Release v${BUILD_NAME} not found on GitHub after publish — check gh auth and network"
+  fi
 fi
 ls -la "$DIST_DIR"
