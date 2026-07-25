@@ -34,7 +34,21 @@ final class ScrollEngine {
         // with natural scrolling (Options+ NATURAL). Software invert flips again.
         var pixels = -Double(deltaV) / multi * verticalSpeed * pixelsPerNotch
         if invertVertical { pixels = -pixels }
-        postPixel(vertical: pixels, horizontal: 0)
+
+        let mods = Self.currentModifiers()
+        if mods.contains(.maskShift) {
+            // Shift + wheel = horizontal scroll (Options+ / macOS convention).
+            // The wheel is host-diverted, so the OS never sees the physical wheel
+            // and cannot do this itself. Strip Shift from the posted event: we
+            // already chose the axis; leaving Shift on can make apps swap twice.
+            postPixel(
+                vertical: 0,
+                horizontal: pixels,
+                flags: mods.subtracting(.maskShift)
+            )
+        } else {
+            postPixel(vertical: pixels, horizontal: 0, flags: mods)
+        }
     }
 
     /// Thumb wheel rotation from 0x2150 (already host-diverted).
@@ -44,10 +58,23 @@ final class ScrollEngine {
         // Match vertical sign convention for “natural” feel on macOS.
         var pixels = -Double(rotation) / res * thumbSpeed * pixelsPerNotch
         if invertThumb { pixels = -pixels }
-        postPixel(vertical: 0, horizontal: pixels)
+        // Already horizontal — Shift would only confuse axis handling.
+        postPixel(
+            vertical: 0,
+            horizontal: pixels,
+            flags: Self.currentModifiers().subtracting(.maskShift)
+        )
     }
 
-    private func postPixel(vertical: Double, horizontal: Double) {
+    /// Live modifier state. HID++ runs on the main run loop; this is a cheap
+    /// read of the session keyboard state (no event tap required).
+    private static func currentModifiers() -> CGEventFlags {
+        CGEventSource.flagsState(.combinedSessionState).intersection([
+            .maskCommand, .maskShift, .maskControl, .maskAlternate, .maskSecondaryFn,
+        ])
+    }
+
+    private func postPixel(vertical: Double, horizontal: Double, flags: CGEventFlags = []) {
         vertRemainder += vertical
         horizRemainder += horizontal
 
@@ -68,6 +95,9 @@ final class ScrollEngine {
             wheel3: 0
         ) else { return }
         ev.location = loc
+        if !flags.isEmpty {
+            ev.flags = flags
+        }
         ev.post(tap: .cghidEventTap)
     }
 }
