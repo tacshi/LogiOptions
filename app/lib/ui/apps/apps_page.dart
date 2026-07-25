@@ -11,36 +11,29 @@ class AppsPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final apps = [
-      (name: 'Global', id: 'global', subtitle: 'Default for all apps'),
-      (name: 'Safari', id: 'com.apple.Safari', subtitle: 'Uses global until customized'),
-      (name: 'Google Chrome', id: 'com.google.Chrome', subtitle: 'Uses global until customized'),
-      (name: 'Terminal', id: 'com.apple.Terminal', subtitle: 'Uses global until customized'),
+      (name: 'Global', id: 'global'),
+      (name: 'Safari', id: 'com.apple.Safari'),
+      (name: 'Google Chrome', id: 'com.google.Chrome'),
+      (name: 'Terminal', id: 'com.apple.Terminal'),
     ];
 
     return ListView(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(16),
       children: [
         Text('Application profiles', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 8),
-        Text(
-          'When an app is frontmost, its profile overrides button actions. '
-          'DPI and SmartShift stay global unless you add per-app overrides later.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
         for (final app in apps)
           Card(
             elevation: 0,
-            margin: const EdgeInsets.only(bottom: 8),
+            margin: const EdgeInsets.only(bottom: 6),
             child: ListTile(
+              dense: true,
               leading: CircleAvatar(
+                radius: 16,
                 child: Text(app.name.characters.first),
               ),
               title: Text(app.name),
-              subtitle: Text(app.subtitle),
-              trailing: const Icon(Icons.chevron_right),
+              trailing: const Icon(Icons.chevron_right, size: 20),
               onTap: () {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
@@ -50,14 +43,14 @@ class AppsPage extends StatelessWidget {
               },
             ),
           ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 4),
         OutlinedButton.icon(
           onPressed: () {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('App picker will scan /Applications')),
             );
           },
-          icon: const Icon(Icons.add),
+          icon: const Icon(Icons.add, size: 18),
           label: const Text('Add application'),
         ),
       ],

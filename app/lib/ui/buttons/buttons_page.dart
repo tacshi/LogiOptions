@@ -123,7 +123,7 @@ class _ButtonsPageState extends State<ButtonsPage> {
         Expanded(
           flex: 5,
           child: Padding(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(16),
             child: DeviceCanvas(
               selected: selected,
               onSelect: (c) => setState(() => _selected = c),
@@ -133,12 +133,12 @@ class _ButtonsPageState extends State<ButtonsPage> {
         Expanded(
           flex: 4,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(0, 24, 24, 24),
+            padding: const EdgeInsets.fromLTRB(0, 16, 16, 16),
             child: Card(
               elevation: 0,
               color: theme.colorScheme.surface,
               child: Padding(
-                padding: const EdgeInsets.all(20),
+                padding: const EdgeInsets.all(16),
                 child: selected == null
                     ? Center(
                         child: Text(
@@ -152,18 +152,11 @@ class _ButtonsPageState extends State<ButtonsPage> {
                           children: [
                             Text(
                               selected.label,
-                              style: theme.textTheme.headlineSmall,
+                              style: theme.textTheme.titleLarge,
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              selected.cidHex,
-                              style: theme.textTheme.labelMedium?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                            const SizedBox(height: 20),
+                            const SizedBox(height: 12),
                             Text('Action', style: theme.textTheme.titleSmall),
-                            const SizedBox(height: 8),
+                            const SizedBox(height: 6),
                             _ActionDropdown(
                               key: ValueKey('main-$selected-${_assignments[selected]}'),
                               value: _assignments[selected]!,
@@ -179,7 +172,7 @@ class _ButtonsPageState extends State<ButtonsPage> {
                               },
                             ),
                             if (_assignments[selected]!.startsWith('custom:')) ...[
-                              const SizedBox(height: 8),
+                              const SizedBox(height: 4),
                               Align(
                                 alignment: Alignment.centerLeft,
                                 child: TextButton.icon(
@@ -193,20 +186,12 @@ class _ButtonsPageState extends State<ButtonsPage> {
                             ],
                             if (selected == ControlId.gesture &&
                                 _assignments[selected] == 'Gesture (4-way)') ...[
-                              const SizedBox(height: 24),
+                              const SizedBox(height: 16),
                               Text(
-                                'Gesture directions',
+                                'Directions',
                                 style: theme.textTheme.titleSmall,
                               ),
-                              const SizedBox(height: 4),
-                              Text(
-                                'Hold the gesture button and move, or click in place. '
-                                'Use Previous/Next Desktop or a custom shortcut (e.g. ⌃← / ⌃→) to switch Spaces.',
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                              const SizedBox(height: 12),
+                              const SizedBox(height: 8),
                               for (final entry in _dirOrder) ...[
                                 Text(entry.$2, style: theme.textTheme.labelLarge),
                                 const SizedBox(height: 4),
@@ -241,18 +226,18 @@ class _ButtonsPageState extends State<ButtonsPage> {
                                     ),
                                   ),
                                 ],
-                                const SizedBox(height: 10),
+                                const SizedBox(height: 8),
                               ],
                             ],
-                            const SizedBox(height: 16),
-                            Text(
-                              widget.state.daemonOnline
-                                  ? 'Changes are applied live to the daemon.'
-                                  : 'Start the daemon to apply remaps.',
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
+                            if (!widget.state.daemonOnline) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                'Start the daemon to apply remaps.',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.error,
+                                ),
                               ),
-                            ),
+                            ],
                           ],
                         ),
                       ),

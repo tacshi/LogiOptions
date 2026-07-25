@@ -151,13 +151,6 @@ class _KeyCaptureDialogState extends State<_KeyCaptureDialog> {
                 ),
               ),
             ),
-            const SizedBox(height: 8),
-            Text(
-              'Tip: macOS Switch Desktop is usually ⌃← / ⌃→',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
           ],
         ),
       ),
