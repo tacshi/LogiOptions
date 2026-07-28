@@ -394,6 +394,29 @@ final class LegacyFeatureTests: XCTestCase {
     }
 }
 
+final class UnifiedBatteryFeatureTests: XCTestCase {
+    func testEmptyUnifiedBatterySampleIsIgnored() {
+        let hid = FakeHidpp()
+        hid.features[.unifiedBattery] = (index: 6, version: 1)
+        hid.responses["6:16:"] = Data([0, 0, 0])
+
+        let battery = DeviceFeatures(device: hid).readBattery()
+
+        XCTAssertNil(battery)
+    }
+
+    func testUnifiedBatteryLevelFlagRemainsAValidFallback() {
+        let hid = FakeHidpp()
+        hid.features[.unifiedBattery] = (index: 6, version: 1)
+        hid.responses["6:16:"] = Data([0, 0x02, 0])
+
+        let battery = DeviceFeatures(device: hid).readBattery()
+
+        XCTAssertEqual(battery?.percent, 30)
+        XCTAssertEqual(battery?.charging, false)
+    }
+}
+
 final class ProgrammableControlTests: XCTestCase {
     func testOnlyFirmwareDivertableControlsAreExposed() {
         let hid = FakeHidpp()

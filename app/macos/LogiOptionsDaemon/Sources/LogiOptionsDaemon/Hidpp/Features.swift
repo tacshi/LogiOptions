@@ -38,12 +38,16 @@ struct DeviceFeatures {
                 return (discharge, charging && discharge < 100)
             }
             // Fallback approximate from level bitmask (FULL=8, GOOD=4, LOW=2, CRITICAL=1)
-            let approx: Int
+            let approx: Int?
             if levelFlags & 0x08 != 0 { approx = 100 }
             else if levelFlags & 0x04 != 0 { approx = 70 }
             else if levelFlags & 0x02 != 0 { approx = 30 }
             else if levelFlags & 0x01 != 0 { approx = 10 }
-            else { approx = 5 }
+            else { approx = nil }
+            // An all-zero reply is an empty/unknown sample, not a critical
+            // battery reading. Ignoring it keeps the last valid UI value and
+            // prevents a false 5% notification.
+            guard let approx else { return nil }
             return (approx, charging)
         }
         if let f = device.resolveFeature(.batteryStatus),
