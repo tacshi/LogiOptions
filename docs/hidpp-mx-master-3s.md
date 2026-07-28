@@ -84,10 +84,12 @@ Diverted presses arrive as HID++ notifications on the feature index.
 
 | Path | Notes |
 |------|--------|
-| Bolt USB | Vendor 0x046D, receiver product often 0xC547/C548; device via receiver index |
+| Bolt USB | Vendor 0x046D, locally verified receiver product 0xC548; device via receiver index |
 | BLE Pro | Direct HID device; device_index often 0xFF |
 
 Probe tools under `tools/` list matching IOHID devices.
+The G/LIGHTSPEED receiver observed as product `0xC547` is intentionally excluded
+before opening an HID interface; it belongs to a separate product line.
 
 ## Live probe result (this machine, Bolt C548)
 
