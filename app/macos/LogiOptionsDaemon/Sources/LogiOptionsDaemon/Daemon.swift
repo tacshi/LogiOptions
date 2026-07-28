@@ -4,9 +4,10 @@ import IOKit.hid
 
 final class Daemon {
     private var config: AppConfig
+    private let deviceService = DeviceService()
     private var device: HidppDevice?
-    private var features: MxFeatures?
-    private var featuresBox: MxFeaturesBox?
+    private var features: DeviceFeatures?
+    private var featuresBox: DeviceFeaturesBox?
     private let engine = ActionEngine()
     private lazy var gestures = GestureTracker(engine: engine)
     private let scroll = ScrollEngine()
@@ -17,6 +18,7 @@ final class Daemon {
     private var activeProfile: ProfileSettings = .defaultGlobal
     /// Currently diverted controls reported as pressed (REPROG_V4 event 0x00).
     private var keysDown: Set<UInt16> = []
+    private var heldMousePresses: [UInt16: MousePress] = [:]
     private var lastBattery: (percent: Int, charging: Bool)?
     private var lastDpi: Int?
     private var lastSmartShift: (enabled: Bool, threshold: Int)?
@@ -27,6 +29,10 @@ final class Daemon {
     private var statusCache: [String: Any] = [:]
     private var statusRefreshTimer: Timer?
     private var signalSources: [Any] = []
+    private var thumbActionAccumulator: Int = 0
+    private var thumbActionStep: Int = 8
+    private var lastThumbActionAt = Date.distantPast
+    private var lastDeviceRescanAt = Date.distantPast
 
     /// Shared so signal handlers can undivert the wheel before exit.
     private static weak var shared: Daemon?
@@ -58,8 +64,6 @@ final class Daemon {
 
         // Connect AFTER the main run loop is spinning so HID++ replies can be delivered.
         DispatchQueue.main.async { [weak self] in
-            // Warm System Events scripts off the critical path (first Space switch).
-            self?.engine.prepare()
             self?.checkOptionsPlus()
             self?.connectDevice()
             self?.refreshStatusCache(light: false)
@@ -78,10 +82,16 @@ final class Daemon {
 
     /// Release host divert so macOS gets native scroll if the daemon dies.
     func restoreNativeScroll() {
+        releaseHeldMouseButtons()
         guard let features else { return }
         DaemonLog.info("restoring native scroll (undivert hi-res + thumb)")
-        _ = features.setHiResWheel(hires: true, invert: false, diverted: false)
-        _ = features.setThumbWheel(diverted: false, invert: false)
+        let capabilities = deviceService.selectedDescriptor?.capabilities
+        if capabilities?.hiResWheel == true {
+            _ = features.setHiResWheel(hires: true, invert: false, diverted: false)
+        }
+        if capabilities?.thumbWheel == true {
+            _ = features.setThumbWheel(diverted: false, invert: false)
+        }
     }
 
     private func installSignalHandlers() {
@@ -108,18 +118,43 @@ final class Daemon {
     // MARK: - Device
 
     private func connectDevice() {
+        lastDeviceRescanAt = Date()
+        restoreNativeScroll()
         device = nil
         features = nil
         featuresBox = nil
+        lastBattery = nil
+        lastDpi = nil
+        lastSmartShift = nil
+        lastHiRes = nil
+        lastThumb = nil
 
-        guard let dev = HidppDiscovery.openFirst() else {
+        let originalConfig = config
+        config.pruneUnsupportedDevices()
+        let preferredDeviceId = config.selectedDeviceId == AppConfig.legacyDeviceId
+            ? nil
+            : config.selectedDeviceId
+        _ = deviceService.rescan(preferredDeviceId: preferredDeviceId)
+        for endpoint in deviceService.endpoints {
+            config.ensureDevice(endpoint.descriptor)
+        }
+        if let selectedId = deviceService.selectedDescriptor?.id {
+            config.selectedDeviceId = selectedId
+        }
+        if config != originalConfig {
+            config.bumpRevision()
+            ConfigStore.save(config)
+        }
+
+        guard let dev = deviceService.selectedDevice else {
             DaemonLog.warn("No HID++ device found")
+            refreshStatusCache()
             return
         }
         device = dev
-        let feat = MxFeatures(device: dev)
+        let feat = DeviceFeatures(device: dev)
         features = feat
-        let box = MxFeaturesBox(feat)
+        let box = DeviceFeaturesBox(feat)
         featuresBox = box
         engine.features = box
 
@@ -144,7 +179,8 @@ final class Daemon {
         reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.checkOptionsPlus()
-            if self.device == nil {
+            if self.device == nil
+                || Date().timeIntervalSince(self.lastDeviceRescanAt) >= 30 {
                 self.connectDevice()
                 self.refreshStatusCache()
             }
@@ -171,17 +207,21 @@ final class Daemon {
             return
         }
         if light {
-            if let bat = features?.readBattery() {
+            if deviceService.selectedDescriptor?.capabilities.battery == true,
+               let bat = features?.readBattery() {
                 noteBattery(bat)
             }
             statusCache = buildStatusDict(includeLiveSensors: false)
             return
         }
-        if let bat = features?.readBattery() { noteBattery(bat) }
-        if let dpi = features?.readDpi(), (200...8000).contains(dpi) { lastDpi = dpi }
-        if let ss = features?.readSmartShift() { lastSmartShift = ss }
-        if let hw = features?.readHiResWheel() { lastHiRes = hw }
-        if let tw = features?.readThumbWheel() { lastThumb = tw }
+        let capabilities = deviceService.selectedDescriptor?.capabilities
+        if capabilities?.battery == true, let bat = features?.readBattery() { noteBattery(bat) }
+        if capabilities?.dpi != nil, let dpi = features?.readDpi(), (50...32_000).contains(dpi) {
+            lastDpi = dpi
+        }
+        if capabilities?.smartShift == true, let ss = features?.readSmartShift() { lastSmartShift = ss }
+        if capabilities?.hiResWheel == true, let hw = features?.readHiResWheel() { lastHiRes = hw }
+        if capabilities?.thumbWheel == true, let tw = features?.readThumbWheel() { lastThumb = tw }
         statusCache = buildStatusDict(includeLiveSensors: false)
     }
 
@@ -210,11 +250,12 @@ final class Daemon {
 
     private func applyOnDevice(_ profile: ProfileSettings) {
         guard let features else { return }
+        let capabilities = deviceService.selectedDescriptor?.capabilities ?? .minimal
         // Keep this short — long multi-feature storms make RPC look dead.
-        if let dpi = profile.dpi {
+        if capabilities.dpi != nil, let dpi = profile.dpi {
             if features.setDpi(dpi) { lastDpi = dpi }
         }
-        if let en = profile.smartShiftEnabled {
+        if capabilities.smartShift, let en = profile.smartShiftEnabled {
             let thr = profile.smartShiftThreshold ?? 10
             if features.setSmartShift(enabled: en, threshold: thr) {
                 lastSmartShift = (en, thr)
@@ -222,11 +263,14 @@ final class Daemon {
         }
         // Options+ host-scales scroll. Divert hi-res wheel so we inject pixel
         // steps (native HID hi-res often lands as huge line jumps on macOS).
-        if let caps = features.readHiResCapabilities() {
+        if capabilities.hiResWheel, let caps = features.readHiResCapabilities() {
             scroll.hiresMultiplier = Double(caps.multiplier)
         }
-        if let info = features.readThumbWheelInfo() {
+        if capabilities.thumbWheel, let info = features.readThumbWheelInfo() {
             scroll.thumbDivertedRes = Double(info.divertedRes)
+            // About fifteen intentional action detents per full revolution;
+            // scales with each device's reported diverted resolution.
+            thumbActionStep = max(1, info.divertedRes / 15)
             DaemonLog.info("thumb res native=\(info.nativeRes) diverted=\(info.divertedRes)")
         }
         scroll.verticalSpeed = profile.scrollSpeed ?? 1.0
@@ -235,19 +279,33 @@ final class Daemon {
         scroll.invertVertical = profile.invertWheel ?? false
         scroll.invertThumb = profile.thumbInvert ?? false
 
-        if let hires = profile.hiresWheel {
+        if capabilities.hiResWheel, let hires = profile.hiresWheel {
             let invert = profile.invertWheel ?? false
-            // Divert when hi-res is on so ScrollEngine owns step size.
-            let divert = hires
+            // Always divert while active: speed and software inversion must
+            // continue working even when high-resolution mode is disabled.
+            let divert = true
             // Firmware invert is unreliable on diverted path — keep fw invert off.
             if features.setHiResWheel(hires: hires, invert: false, diverted: divert) {
                 lastHiRes = (hires, invert, divert)
             }
         }
-        let thumbDivert = profile.thumbDivert ?? true
-        let thumbInvert = profile.thumbInvert ?? false
-        if features.setThumbWheel(diverted: thumbDivert, invert: false) {
-            lastThumb = (thumbDivert, thumbInvert)
+        if capabilities.thumbWheel {
+            let thumbDivert = profile.thumbMode == "actions" ? true : (profile.thumbDivert ?? true)
+            let thumbInvert = profile.thumbInvert ?? false
+            if features.setThumbWheel(diverted: thumbDivert, invert: false) {
+                lastThumb = (thumbDivert, thumbInvert)
+            }
+        }
+        if capabilities.haptics,
+           let deviceId = config.selectedDeviceId,
+           let settings = config.devices[deviceId]?.settings {
+            let level = settings.hapticEnabled ? settings.hapticLevel : 0
+            _ = features.setHapticLevel(level)
+        }
+        if capabilities.forceSensing,
+           let deviceId = config.selectedDeviceId,
+           let threshold = config.devices[deviceId]?.settings.forceThreshold {
+            _ = features.setForceThreshold(threshold)
         }
         DaemonLog.info(String(
             format: "scroll cfg speed=%.2f thumb=%.2f invV=%@ invT=%@",
@@ -255,15 +313,13 @@ final class Daemon {
             String(scroll.invertVertical), String(scroll.invertThumb)
         ))
 
-        // Divert remappable CIDs (host-side actions).
-        let cids: [UInt16] = [
-            Hidpp.Control.middle.rawValue,
-            Hidpp.Control.back.rawValue,
-            Hidpp.Control.forward.rawValue,
-            Hidpp.Control.gesture.rawValue,
-            Hidpp.Control.modeShift.rawValue,
-        ]
-        features.applyDiverts(cids: cids)
+        let controls = deviceService.selectedDescriptor?.controls.map(\.cid) ?? []
+        let rawControls = Set(controls.filter {
+            guard let action = profile.action(forCid: $0) else { return false }
+            if case .gesture = action { return true }
+            return false
+        })
+        features.applyDiverts(cids: controls, rawXYCids: rawControls)
         refreshStatusCache(light: true)
     }
 
@@ -344,7 +400,14 @@ final class Daemon {
             DaemonLog.warn(String(format: "no action for cid 0x%04X in active profile", cid))
             return
         }
-        if cid == Hidpp.Control.gesture.rawValue || isGestureAction(action) {
+        if case .mouse(let button) = action {
+            if heldMousePresses[cid] == nil,
+               let press = engine.beginMouseButton(button) {
+                heldMousePresses[cid] = press
+            }
+            return
+        }
+        if isGestureAction(action) {
             gestures.begin(spec: action)
             return
         }
@@ -357,12 +420,23 @@ final class Daemon {
     }
 
     private func onButtonUp(cid: UInt16) {
+        if let press = heldMousePresses.removeValue(forKey: cid) {
+            engine.endMouseButton(press)
+        }
         if gestures.isActive {
             // End gesture on any release while tracking (typically the gesture CID).
-            if cid == Hidpp.Control.gesture.rawValue || keysDown.isEmpty {
+            let releasedAction = activeProfile.action(forCid: cid)
+            if releasedAction.map(isGestureAction) == true || keysDown.isEmpty {
                 gestures.end()
             }
         }
+    }
+
+    private func releaseHeldMouseButtons() {
+        for press in heldMousePresses.values {
+            engine.endMouseButton(press)
+        }
+        heldMousePresses.removeAll()
     }
 
     private func isGestureAction(_ action: ActionSpec) -> Bool {
@@ -382,6 +456,21 @@ final class Daemon {
         // rotation:i16 BE, timestamp, status, flags (logiops ThumbwheelEvent)
         guard params.count >= 2 else { return }
         let rotation = Int16(bitPattern: (UInt16(params[0]) << 8) | UInt16(params[1]))
+        if activeProfile.thumbMode == "actions" {
+            let value = (activeProfile.thumbInvert ?? false) ? -Int(rotation) : Int(rotation)
+            thumbActionAccumulator += value
+            let now = Date()
+            guard abs(thumbActionAccumulator) >= thumbActionStep,
+                  now.timeIntervalSince(lastThumbActionAt) >= 0.08 else { return }
+            let action = thumbActionAccumulator < 0
+                ? activeProfile.thumbLeftAction
+                : activeProfile.thumbRightAction
+            thumbActionAccumulator += thumbActionAccumulator < 0
+                ? thumbActionStep : -thumbActionStep
+            lastThumbActionAt = now
+            if let action { engine.execute(action.toActionSpec()) }
+            return
+        }
         scroll.injectThumb(rotation: rotation)
     }
 
@@ -406,14 +495,41 @@ final class Daemon {
         case "getStatus":
             // Instant — never block RPC on HID++.
             return statusDictFast()
+        case "getSnapshot":
+            return snapshotDict()
+        case "listDevices":
+            return devicesDict()
+        case "selectDevice":
+            return runOnMainSync { self.selectDevice(params) }
+        case "rescanDevices":
+            return runOnMainSync {
+                self.connectDevice()
+                return self.snapshotDict()
+            }
         case "getConfig":
             return configDict()
+        case "requestAccessibility":
+            return runOnMainSync {
+                Permissions.requestForDaemonFromUser()
+                self.refreshStatusCache(light: true)
+                return [
+                    "ok": true,
+                    "accessibilityTrusted": Permissions.accessibilityTrusted(),
+                ]
+            }
+        case "putProfile":
+            return runOnMainSync { self.putProfile(params) }
+        case "deleteProfile":
+            return runOnMainSync { self.deleteProfile(params) }
+        case "patchDeviceSettings":
+            return runOnMainSync { self.patchDeviceSettings(params) }
         case "setConfig":
             return runOnMainSync { self.setConfig(params) }
         case "setDpi":
             return runOnMainSync {
                 let dpi = params?["dpi"] as? Int ?? 1000
                 self.config.global.dpi = dpi
+                self.config.bumpRevision()
                 ConfigStore.save(self.config)
                 let ok = self.features?.setDpi(dpi) ?? false
                 if ok { self.lastDpi = dpi }
@@ -426,6 +542,7 @@ final class Daemon {
                 let thr = params?["threshold"] as? Int ?? 10
                 self.config.global.smartShiftEnabled = en
                 self.config.global.smartShiftThreshold = thr
+                self.config.bumpRevision()
                 ConfigStore.save(self.config)
                 let ok = self.features?.setSmartShift(enabled: en, threshold: thr) ?? false
                 if ok { self.lastSmartShift = (en, thr) }
@@ -438,6 +555,7 @@ final class Daemon {
                 let invert = JsonUtil.bool(params?["invert"], default: false)
                 self.config.global.hiresWheel = hires
                 self.config.global.invertWheel = invert
+                self.config.bumpRevision()
                 self.scroll.invertVertical = invert
                 ConfigStore.save(self.config)
                 let divert = hires
@@ -452,6 +570,7 @@ final class Daemon {
             return runOnMainSync {
                 let v = min(2, max(0.05, JsonUtil.double(params?["speed"], default: 1.0)))
                 self.config.global.scrollSpeed = v
+                self.config.bumpRevision()
                 self.scroll.verticalSpeed = v
                 ConfigStore.save(self.config)
                 DaemonLog.info(String(format: "setScrollSpeed %.2f", v))
@@ -464,6 +583,7 @@ final class Daemon {
                 let invert = JsonUtil.bool(params?["invert"], default: false)
                 self.config.global.thumbDivert = divert
                 self.config.global.thumbInvert = invert
+                self.config.bumpRevision()
                 self.scroll.invertThumb = invert
                 ConfigStore.save(self.config)
                 // Software invert while diverted.
@@ -477,6 +597,7 @@ final class Daemon {
             return runOnMainSync {
                 let v = min(2, max(0.05, JsonUtil.double(params?["speed"], default: 1.0)))
                 self.config.global.thumbSpeed = v
+                self.config.bumpRevision()
                 self.scroll.thumbSpeed = v
                 ConfigStore.save(self.config)
                 DaemonLog.info(String(format: "setThumbSpeed %.2f", v))
@@ -557,21 +678,21 @@ final class Daemon {
 
     private func buildStatusDict(includeLiveSensors: Bool) -> [String: Any] {
         let connected = device != nil
-        let transport: String
-        if let t = device?.transport.uppercased() {
-            if t.contains("USB") { transport = "bolt" }
-            else if t.contains("BLUETOOTH") || t.contains("BLE") { transport = "ble" }
-            else { transport = t.lowercased() }
-        } else {
-            transport = "unknown"
-        }
+        let descriptor = deviceService.selectedDescriptor
+            ?? config.selectedDeviceId.flatMap { config.recentDevices[$0] }
+        let transport = descriptor?.transport ?? "unknown"
         var d: [String: Any] = [
             "ok": true,
             "daemonOnline": true,
             "connected": connected,
-            "deviceName": features?.readDeviceName() ?? device?.name ?? "No device",
-            "modelId": "2b034",
+            "deviceId": descriptor?.id as Any,
+            "deviceName": descriptor?.name ?? features?.readDeviceName() ?? device?.name ?? "No device",
+            "modelId": descriptor?.modelId ?? "unknown",
             "connection": transport,
+            "verification": descriptor?.verification.rawValue ?? "compatible",
+            "capabilities": descriptor.flatMap { JsonUtil.object($0.capabilities) } as Any,
+            "controls": descriptor.flatMap { JsonUtil.object($0.controls) } as Any,
+            "artworkKey": descriptor?.artworkKey ?? "generic_mouse",
             "optionsPlusRunning": optionsPlusRunning,
             "frontApp": focus.frontBundleId as Any,
             "accessibilityTrusted": Permissions.accessibilityTrusted(),
@@ -590,21 +711,22 @@ final class Daemon {
             d["batteryPercent"] = bat.percent
             d["charging"] = bat.charging
         }
-        d["dpi"] = lastDpi ?? config.global.dpi ?? 1000
+        d["dpi"] = lastDpi ?? activeProfile.dpi ?? 1000
         if let ss = lastSmartShift {
             d["smartShiftEnabled"] = ss.enabled
             d["smartShiftThreshold"] = ss.threshold
         } else {
-            d["smartShiftEnabled"] = config.global.smartShiftEnabled as Any
-            d["smartShiftThreshold"] = config.global.smartShiftThreshold as Any
+            d["smartShiftEnabled"] = activeProfile.smartShiftEnabled as Any
+            d["smartShiftThreshold"] = activeProfile.smartShiftThreshold as Any
         }
         // Prefer config for invert/speed (host-owned while diverted), not device flags.
-        d["hiresWheel"] = lastHiRes?.hires ?? config.global.hiresWheel as Any
-        d["invertWheel"] = config.global.invertWheel ?? scroll.invertVertical
-        d["thumbDivert"] = lastThumb?.diverted ?? config.global.thumbDivert as Any
-        d["thumbInvert"] = config.global.thumbInvert ?? scroll.invertThumb
-        d["scrollSpeed"] = config.global.scrollSpeed ?? scroll.verticalSpeed
-        d["thumbSpeed"] = config.global.thumbSpeed ?? scroll.thumbSpeed
+        d["hiresWheel"] = lastHiRes?.hires ?? activeProfile.hiresWheel as Any
+        d["invertWheel"] = activeProfile.invertWheel ?? scroll.invertVertical
+        d["thumbDivert"] = lastThumb?.diverted ?? activeProfile.thumbDivert as Any
+        d["thumbInvert"] = activeProfile.thumbInvert ?? scroll.invertThumb
+        d["scrollSpeed"] = activeProfile.scrollSpeed ?? scroll.verticalSpeed
+        d["thumbSpeed"] = activeProfile.thumbSpeed ?? scroll.thumbSpeed
+        d["revision"] = config.revision
         // Plist present = user opted in (even if this process was UI-spawned).
         let loginPlist = FileManager.default.fileExists(atPath: LoginAgent.plistURL.path)
         d["loginAtStartup"] = loginPlist || LoginAgent.isEnabled()
@@ -616,7 +738,7 @@ final class Daemon {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return ["ok": false, "error": "encode failed"]
         }
-        return ["ok": true, "config": obj]
+        return ["ok": true, "revision": config.revision, "config": obj]
     }
 
     private func setConfig(_ params: [String: Any]?) -> [String: Any] {
@@ -626,9 +748,158 @@ final class Daemon {
             return ["ok": false, "error": "invalid config"]
         }
         config = cfg
+        config.version = 3
+        config.bumpRevision()
         ConfigStore.save(config)
         applyProfile(forBundleId: focus.frontBundleId)
         return ["ok": true]
+    }
+
+    private func devicesDict() -> [String: Any] {
+        let recent = Array(config.recentDevices.values)
+        let descriptors = deviceService.descriptors(includingRecent: recent)
+        return [
+            "ok": true,
+            "devices": JsonUtil.object(descriptors) ?? [],
+            "selectedDeviceId": config.selectedDeviceId as Any,
+            "revision": config.revision,
+        ]
+    }
+
+    private func snapshotDict() -> [String: Any] {
+        var result = statusDictFast()
+        let deviceResult = devicesDict()
+        result["devices"] = deviceResult["devices"]
+        result["selectedDeviceId"] = config.selectedDeviceId as Any
+        result["revision"] = config.revision
+        result["config"] = JsonUtil.object(config)
+        return result
+    }
+
+    private func revisionConflict(_ params: [String: Any]?) -> [String: Any]? {
+        guard let expected = params?["expectedRevision"] else { return nil }
+        let value = JsonUtil.int(expected, default: -1)
+        guard value != config.revision else { return nil }
+        return [
+            "ok": false,
+            "error": [
+                "code": "revision_conflict",
+                "message": "Configuration changed; refresh and try again.",
+            ],
+            "revision": config.revision,
+        ]
+    }
+
+    private func selectDevice(_ params: [String: Any]?) -> [String: Any] {
+        if let conflict = revisionConflict(params) { return conflict }
+        guard let id = params?["deviceId"] as? String,
+              deviceService.endpoints.contains(where: { $0.descriptor.id == id }) else {
+            return rpcError("device_not_found", "The selected device is not connected.")
+        }
+        restoreNativeScroll()
+        config.selectedDeviceId = id
+        config.bumpRevision()
+        ConfigStore.save(config)
+        connectDevice()
+        return snapshotDict()
+    }
+
+    private func putProfile(_ params: [String: Any]?) -> [String: Any] {
+        if let conflict = revisionConflict(params) { return conflict }
+        guard let deviceId = params?["deviceId"] as? String,
+              var configuration = config.devices[deviceId],
+              let profile = JsonUtil.decode(ProfileSettings.self, from: params?["profile"]) else {
+            return rpcError("invalid_profile", "Profile data or device id is invalid.")
+        }
+        if let bundleId = params?["bundleId"] as? String, !bundleId.isEmpty {
+            configuration.apps[bundleId] = profile
+            if let metadata = JsonUtil.decode(AppIdentity.self, from: params?["application"]) {
+                configuration.applicationMetadata[bundleId] = metadata
+            }
+        } else {
+            configuration.global = profile
+        }
+        config.devices[deviceId] = configuration
+        config.bumpRevision()
+        ConfigStore.save(config)
+        if config.selectedDeviceId == deviceId {
+            applyProfile(forBundleId: focus.frontBundleId)
+        }
+        return ["ok": true, "revision": config.revision, "config": JsonUtil.object(config) as Any]
+    }
+
+    private func deleteProfile(_ params: [String: Any]?) -> [String: Any] {
+        if let conflict = revisionConflict(params) { return conflict }
+        guard let deviceId = params?["deviceId"] as? String,
+              let bundleId = params?["bundleId"] as? String,
+              var configuration = config.devices[deviceId] else {
+            return rpcError("invalid_profile", "Device id and application bundle id are required.")
+        }
+        configuration.apps.removeValue(forKey: bundleId)
+        configuration.applicationMetadata.removeValue(forKey: bundleId)
+        config.devices[deviceId] = configuration
+        config.bumpRevision()
+        ConfigStore.save(config)
+        if config.selectedDeviceId == deviceId {
+            applyProfile(forBundleId: focus.frontBundleId)
+        }
+        return ["ok": true, "revision": config.revision]
+    }
+
+    private func patchDeviceSettings(_ params: [String: Any]?) -> [String: Any] {
+        if let conflict = revisionConflict(params) { return conflict }
+        guard let deviceId = params?["deviceId"] as? String,
+              var configuration = config.devices[deviceId],
+              let patch = params?["settings"] as? [String: Any] else {
+            return rpcError("invalid_settings", "Device settings are invalid.")
+        }
+        let descriptor = config.recentDevices[deviceId]
+        let patchesHaptics = patch["hapticEnabled"] != nil
+            || patch["hapticLevel"] != nil
+            || patch["hapticPowerSave"] != nil
+        if patchesHaptics, descriptor?.capabilities.haptics != true {
+            return rpcError("unsupported_capability", "This device does not expose haptics.")
+        }
+        if patch["forceThreshold"] != nil, descriptor?.capabilities.forceSensing != true {
+            return rpcError("unsupported_capability", "This device does not expose force sensing.")
+        }
+        if let value = patch["hapticEnabled"] {
+            configuration.settings.hapticEnabled = JsonUtil.bool(value)
+        }
+        if let value = patch["hapticLevel"] {
+            configuration.settings.hapticLevel = min(100, max(0, JsonUtil.int(value)))
+        }
+        if let value = patch["hapticPowerSave"] {
+            configuration.settings.hapticPowerSave = JsonUtil.bool(value)
+        }
+        if let value = patch["forceThreshold"] {
+            configuration.settings.forceThreshold = min(100, max(0, JsonUtil.int(value)))
+        }
+        config.devices[deviceId] = configuration
+        config.bumpRevision()
+        ConfigStore.save(config)
+
+        var applied = true
+        if config.selectedDeviceId == deviceId {
+            if patch["hapticEnabled"] != nil || patch["hapticLevel"] != nil {
+                let level = configuration.settings.hapticEnabled
+                    ? configuration.settings.hapticLevel : 0
+                applied = features?.setHapticLevel(level) ?? false
+            }
+            if let threshold = configuration.settings.forceThreshold,
+               patch["forceThreshold"] != nil {
+                applied = (features?.setForceThreshold(threshold) ?? false) && applied
+            }
+        }
+        return ["ok": applied, "revision": config.revision]
+    }
+
+    private func rpcError(_ code: String, _ message: String) -> [String: Any] {
+        [
+            "ok": false,
+            "error": ["code": code, "message": message],
+            "revision": config.revision,
+        ]
     }
 
     private func setButton(_ params: [String: Any]?) -> [String: Any] {
@@ -646,6 +917,7 @@ final class Daemon {
         } else {
             config.global.buttons[cid] = action
         }
+        config.bumpRevision()
         ConfigStore.save(config)
         applyProfile(forBundleId: focus.frontBundleId)
         DaemonLog.info("setButton \(cid) → \(String(data: data, encoding: .utf8) ?? "?")")
@@ -653,7 +925,7 @@ final class Daemon {
     }
 }
 
-private extension MxFeatures {
+private extension DeviceFeatures {
     func resolveAlive() -> Bool {
         device.resolveFeature(.featureSet) != nil
     }

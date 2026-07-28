@@ -1,14 +1,31 @@
 import Foundation
 
-/// High-level MX Master 3S feature helpers on top of HidppDevice.
-struct MxFeatures {
-    let device: HidppDevice
+/// Capability-gated HID++ helpers shared by supported pointing devices.
+struct DeviceFeatures {
+    let device: HidppRequesting
 
     // MARK: - Battery
 
     /// UNIFIED_BATTERY (0x1004) uses function 0x10 — see Solaar `get_battery_unified`.
     /// Response: discharge% : u8, level_flags : u8, status : u8, …
     func readBattery() -> (percent: Int, charging: Bool)? {
+        if device.protocolVersion < 2 {
+            if let charge = device.legacyReadRegister(0x0D),
+               charge.count >= 3 {
+                let percent = min(100, Int(charge[0]))
+                let state = charge[2] & 0xF0
+                return (percent, state == 0x50 || state == 0x90)
+            }
+            if let status = device.legacyReadRegister(0x07),
+               status.count >= 2 {
+                let approximate = [0: 5, 1: 10, 3: 30, 5: 70, 7: 100]
+                return (
+                    approximate[Int(status[0])] ?? 5,
+                    status[1] & 0x03 != 0
+                )
+            }
+            return nil
+        }
         if let f = device.resolveFeature(.unifiedBattery),
            let r = device.featureRequest(featureIndex: f.index, function: 0x10),
            r.count >= 3 {
@@ -44,17 +61,77 @@ struct MxFeatures {
 
     /// Friendly product name when available (feature 0x0005 DEVICE_NAME).
     func readDeviceName() -> String? {
-        // Prefer HID product string if it already looks like a mouse name
         let product = device.name
-        if product.localizedCaseInsensitiveContains("MX Master") {
+        if !device.isReceiver, product != "unknown" {
             return product
         }
-        // DEVICE_NAME 0x0005 is not always mapped; try FeatureSet for 0x0005
-        // Fallback for MX Master 3S on Bolt: show model label not "USB Receiver"
-        if device.isReceiver {
-            return "MX Master 3S"
+        guard let feature = device.resolveFeature(.deviceName),
+              let lengthReply = device.featureRequest(featureIndex: feature.index, function: 0x00),
+              let length = lengthReply.first, length > 0 else {
+            return product == "unknown" || device.isReceiver ? nil : product
         }
-        return product == "unknown" ? nil : product
+        var bytes: [UInt8] = []
+        var offset: UInt8 = 0
+        while bytes.count < Int(length) {
+            guard let chunk = device.featureRequest(
+                featureIndex: feature.index,
+                function: 0x10,
+                params: [offset]
+            ), !chunk.isEmpty else { break }
+            bytes.append(contentsOf: chunk)
+            offset = UInt8(clamping: bytes.count)
+        }
+        let trimmed = Array(bytes.prefix(Int(length))).prefix { $0 != 0 }
+        return String(bytes: trimmed, encoding: .utf8)
+    }
+
+    /// DEVICE_FW_VERSION exposes a stable unit id, model id, and colour/model
+    /// derivative. The model bytes begin at offset 6; starting at offset 7
+    /// drops the product-family nibble (for example 2b034 becomes b034).
+    func readIdentity() -> (unitId: String?, modelId: String?, extendedModel: Int?) {
+        guard let feature = device.resolveFeature(.deviceInfo),
+              let reply = device.featureRequest(featureIndex: feature.index, function: 0x00),
+              reply.count >= 12 else {
+            return (nil, nil, nil)
+        }
+        return Self.parseIdentityReply(reply)
+    }
+
+    static func parseIdentityReply(
+        _ reply: Data
+    ) -> (unitId: String?, modelId: String?, extendedModel: Int?) {
+        guard reply.count >= 12 else { return (nil, nil, nil) }
+        let unit = reply[1...4].map { String(format: "%02x", $0) }.joined()
+        var modelBytes = Array(reply.dropFirst(6).prefix(6))
+        while modelBytes.last == 0 {
+            modelBytes.removeLast()
+        }
+        let encodedModel = modelBytes
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let model = encodedModel
+            .drop(while: { $0 == "0" })
+        let extendedModel = reply.count > 12 ? Int(reply[12]) : nil
+        return (
+            unit == "00000000" ? nil : unit,
+            model.isEmpty ? nil : String(model),
+            extendedModel == 0 ? nil : extendedModel
+        )
+    }
+
+    func detectedCapabilities(fallbackDpi: DpiRange?) -> DeviceCapabilities {
+        DeviceCapabilities(
+            battery: device.resolveFeature(.unifiedBattery) != nil
+                || device.resolveFeature(.batteryStatus) != nil,
+            dpi: device.resolveFeature(.extendedAdjustableDpi) != nil
+                || device.resolveFeature(.adjustableDpi) != nil ? fallbackDpi : nil,
+            hiResWheel: device.resolveFeature(.hiResWheel) != nil,
+            smartShift: device.resolveFeature(.smartShiftEnhanced) != nil
+                || device.resolveFeature(.smartShift) != nil,
+            thumbWheel: device.resolveFeature(.thumbWheel) != nil,
+            haptics: device.resolveFeature(.haptic) != nil,
+            forceSensing: device.resolveFeature(.forceSensingButton) != nil
+        )
     }
 
     // MARK: - DPI
@@ -232,6 +309,29 @@ struct MxFeatures {
         device.resolveFeature(.reprogControlsV4)?.index
     }
 
+    /// Returns every control the firmware explicitly says can be diverted.
+    /// `nil` means the feature/query was unavailable; an empty array is a
+    /// successful probe with no host-configurable controls.
+    func readProgrammableControls() -> [UInt16]? {
+        guard let feature = device.resolveFeature(.reprogControlsV4),
+              let countReply = device.featureRequest(featureIndex: feature.index, function: 0x00),
+              let count = countReply.first else { return nil }
+        var controls: [UInt16] = []
+        for index in 0..<count {
+            guard let reply = device.featureRequest(
+                featureIndex: feature.index,
+                function: 0x10,
+                params: [index]
+            ), reply.count >= 5 else { continue }
+            let cid = (UInt16(reply[0]) << 8) | UInt16(reply[1])
+            let flags = UInt16(reply[4])
+                | (reply.count >= 9 ? UInt16(reply[8]) << 8 : 0)
+            let divertable = flags & 0x20 != 0 || flags & 0x40 != 0
+            if cid != 0, divertable { controls.append(cid) }
+        }
+        return controls
+    }
+
     /// Mapping flags for setCidReporting (byte 2 of params).
     /// Divert + valid: 0x01|0x02. RawXY + valid: 0x10|0x20.
     @discardableResult
@@ -256,15 +356,72 @@ struct MxFeatures {
         return ok
     }
 
-    /// Apply divert for remappable CIDs. Gesture button also gets RAW_XY.
-    func applyDiverts(cids: [UInt16]) {
+    /// Apply divert for remappable CIDs. Gesture controls can additionally
+    /// request RAW_XY so GestureTracker receives movement while held.
+    func applyDiverts(cids: [UInt16], rawXYCids: Set<UInt16> = [0x00C3]) {
         for cid in cids {
-            let raw = (cid == Hidpp.Control.gesture.rawValue)
+            let raw = rawXYCids.contains(cid)
             if !setDivert(cid: cid, diverted: true, rawXY: raw), raw {
                 // Some firmware rejects rawXY — fall back to divert-only.
                 _ = setDivert(cid: cid, diverted: true, rawXY: false)
             }
         }
+    }
+
+    // MARK: - Haptics / force sensing
+
+    func readHapticLevel() -> Int? {
+        guard let feature = device.resolveFeature(.haptic),
+              let reply = device.featureRequest(featureIndex: feature.index, function: 0x10),
+              reply.count >= 2 else { return nil }
+        return reply[0] & 0x01 == 0 ? 0 : Int(reply[1])
+    }
+
+    @discardableResult
+    func setHapticLevel(_ level: Int) -> Bool {
+        guard let feature = device.resolveFeature(.haptic) else { return false }
+        let clamped = UInt8(clamping: max(0, min(100, level)))
+        let params: [UInt8] = clamped == 0 ? [0x00, 50] : [0x01, clamped]
+        return device.featureRequest(featureIndex: feature.index, function: 0x20, params: params) != nil
+    }
+
+    @discardableResult
+    func playHaptic(waveform: UInt8) -> Bool {
+        guard let feature = device.resolveFeature(.haptic) else { return false }
+        return device.featureRequest(featureIndex: feature.index, function: 0x40, params: [waveform]) != nil
+    }
+
+    func readForceThreshold(buttonIndex: UInt8 = 0) -> (minimum: Int, maximum: Int, current: Int)? {
+        guard let feature = device.resolveFeature(.forceSensingButton),
+              let limits = device.featureRequest(
+                featureIndex: feature.index,
+                function: 0x10,
+                params: [buttonIndex]
+              ),
+              limits.count >= 8,
+              let currentReply = device.featureRequest(
+                featureIndex: feature.index,
+                function: 0x20,
+                params: [buttonIndex]
+              ),
+              currentReply.count >= 2 else { return nil }
+        let maximum = Int((UInt16(limits[4]) << 8) | UInt16(limits[5]))
+        let minimum = Int((UInt16(limits[6]) << 8) | UInt16(limits[7]))
+        let current = Int((UInt16(currentReply[0]) << 8) | UInt16(currentReply[1]))
+        return (minimum, maximum, current)
+    }
+
+    @discardableResult
+    func setForceThreshold(_ threshold: Int, buttonIndex: UInt8 = 0) -> Bool {
+        guard let feature = device.resolveFeature(.forceSensingButton),
+              let limits = readForceThreshold(buttonIndex: buttonIndex),
+              (limits.minimum...limits.maximum).contains(threshold) else { return false }
+        let value = UInt16(clamping: threshold)
+        return device.featureRequest(
+            featureIndex: feature.index,
+            function: 0x30,
+            params: [buttonIndex, UInt8(value >> 8), UInt8(value & 0xFF)]
+        ) != nil
     }
 }
 

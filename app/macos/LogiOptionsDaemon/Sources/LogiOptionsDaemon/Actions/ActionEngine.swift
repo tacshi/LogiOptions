@@ -2,9 +2,20 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+enum NavigationAction: Equatable {
+    case auxiliaryMouseButton(Int64)
+    case keystroke([String])
+}
+
+enum MousePress: Equatable {
+    case standard(String)
+    case auxiliary(Int64)
+    case momentaryKeystroke([String])
+}
+
 /// Executes host-side actions (requires Accessibility for some paths).
 final class ActionEngine {
-    weak var features: MxFeaturesBox?
+    weak var features: DeviceFeaturesBox?
 
     /// Serial queue for System Events injects. NSAppleScript is not thread-safe;
     /// work stays off the HID/main path so gesture tracking is never blocked.
@@ -28,6 +39,8 @@ final class ActionEngine {
             postSystem(id)
         case .media(let id):
             postMedia(id)
+        case .open(let kind, let value):
+            openTarget(kind: kind, value: value)
         case .smartShiftToggle:
             _ = features?.features.toggleSmartShift()
         case .gesture:
@@ -36,66 +49,151 @@ final class ActionEngine {
         }
     }
 
-    /// Pre-compile System Events scripts so the first Space switch is warm.
-    func prepare() {
-        systemEventsQueue.async { [weak self] in
-            self?.warmSystemEvents()
+    private func openTarget(kind: String, value: String) {
+        let workspace = NSWorkspace.shared
+        switch kind.lowercased() {
+        case "url":
+            if let url = URL(string: value) { workspace.open(url) }
+        case "app", "file":
+            workspace.open(URL(fileURLWithPath: value))
+        default:
+            DaemonLog.warn("Unknown open target kind \(kind)")
         }
     }
 
     // MARK: - Mouse
 
     private func postMouseButton(_ name: String) {
-        let loc = CGEvent(source: nil)?.location ?? .zero
-        switch name.lowercased() {
-        case "left":
-            click(button: .left, at: loc)
-        case "right":
-            click(button: .right, at: loc)
-        case "middle":
-            click(button: .center, at: loc)
-        case "back":
-            // macOS: button 3 often back
-            otherClick(buttonNumber: 3, at: loc)
-        case "forward":
-            otherClick(buttonNumber: 4, at: loc)
-        default:
+        guard let press = beginMouseButton(name) else { return }
+        endMouseButton(press)
+    }
+
+    /// Preserve physical down/up timing for remapped mouse buttons so dragging
+    /// and press-and-hold work. Momentary keyboard navigation fires on down.
+    func beginMouseButton(_ name: String) -> MousePress? {
+        guard let press = Self.mousePress(
+            for: name,
+            frontmostBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        ) else {
             DaemonLog.warn("Unknown mouse button \(name)")
+            return nil
+        }
+        let loc = CGEvent(source: nil)?.location ?? .zero
+        switch press {
+        case .standard(let button):
+            postStandardMouseButton(button, down: true, at: loc)
+        case .auxiliary(let buttonNumber):
+            postAuxiliaryMouseButton(buttonNumber, down: true, at: loc)
+        case .momentaryKeystroke(let keys):
+            postKeystroke(keys)
+        }
+        return press
+    }
+
+    func endMouseButton(_ press: MousePress) {
+        let loc = CGEvent(source: nil)?.location ?? .zero
+        switch press {
+        case .standard(let button):
+            postStandardMouseButton(button, down: false, at: loc)
+        case .auxiliary(let buttonNumber):
+            postAuxiliaryMouseButton(buttonNumber, down: false, at: loc)
+        case .momentaryKeystroke:
+            break
         }
     }
 
-    private func click(button: CGMouseButton, at loc: CGPoint) {
-        let downType: CGEventType
-        let upType: CGEventType
-        switch button {
-        case .left: downType = .leftMouseDown; upType = .leftMouseUp
-        case .right: downType = .rightMouseDown; upType = .rightMouseUp
-        case .center: downType = .otherMouseDown; upType = .otherMouseUp
-        @unknown default: downType = .leftMouseDown; upType = .leftMouseUp
+    static func mousePress(
+        for name: String,
+        frontmostBundleIdentifier: String?
+    ) -> MousePress? {
+        let normalized = name.lowercased()
+        if ["left", "right", "middle"].contains(normalized) {
+            return .standard(normalized)
         }
-        if let down = CGEvent(mouseEventSource: nil, mouseType: downType, mouseCursorPosition: loc, mouseButton: button) {
-            if button == .center {
-                down.setIntegerValueField(.mouseEventButtonNumber, value: 2)
-            }
-            down.post(tap: .cghidEventTap)
-        }
-        if let up = CGEvent(mouseEventSource: nil, mouseType: upType, mouseCursorPosition: loc, mouseButton: button) {
-            if button == .center {
-                up.setIntegerValueField(.mouseEventButtonNumber, value: 2)
-            }
-            up.post(tap: .cghidEventTap)
+        guard let navigation = navigationAction(
+            for: normalized,
+            frontmostBundleIdentifier: frontmostBundleIdentifier
+        ) else { return nil }
+        switch navigation {
+        case .auxiliaryMouseButton(let number):
+            return .auxiliary(number)
+        case .keystroke(let keys):
+            return .momentaryKeystroke(keys)
         }
     }
 
-    private func otherClick(buttonNumber: Int64, at loc: CGPoint) {
-        if let down = CGEvent(mouseEventSource: nil, mouseType: .otherMouseDown, mouseCursorPosition: loc, mouseButton: .center) {
-            down.setIntegerValueField(.mouseEventButtonNumber, value: buttonNumber)
-            down.post(tap: .cghidEventTap)
+    static func navigationAction(
+        for name: String,
+        frontmostBundleIdentifier: String?
+    ) -> NavigationAction? {
+        let normalizedName = name.lowercased()
+        if frontmostBundleIdentifier?.lowercased() == "com.apple.finder" {
+            switch normalizedName {
+            case "back":
+                return .keystroke(["cmd", "["])
+            case "forward":
+                return .keystroke(["cmd", "]"])
+            default:
+                return nil
+            }
         }
-        if let up = CGEvent(mouseEventSource: nil, mouseType: .otherMouseUp, mouseCursorPosition: loc, mouseButton: .center) {
-            up.setIntegerValueField(.mouseEventButtonNumber, value: buttonNumber)
-            up.post(tap: .cghidEventTap)
+
+        switch normalizedName {
+        case "back":
+            // macOS auxiliary button 3 is commonly treated as Back.
+            return .auxiliaryMouseButton(3)
+        case "forward":
+            return .auxiliaryMouseButton(4)
+        default:
+            return nil
         }
+    }
+
+    private func postStandardMouseButton(
+        _ name: String,
+        down: Bool,
+        at location: CGPoint
+    ) {
+        let type: CGEventType
+        let button: CGMouseButton
+        switch name {
+        case "left":
+            type = down ? .leftMouseDown : .leftMouseUp
+            button = .left
+        case "right":
+            type = down ? .rightMouseDown : .rightMouseUp
+            button = .right
+        case "middle":
+            type = down ? .otherMouseDown : .otherMouseUp
+            button = .center
+        default:
+            return
+        }
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: location,
+            mouseButton: button
+        ) else { return }
+        if button == .center {
+            event.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+        }
+        event.post(tap: .cghidEventTap)
+    }
+
+    private func postAuxiliaryMouseButton(
+        _ buttonNumber: Int64,
+        down: Bool,
+        at location: CGPoint
+    ) {
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: down ? .otherMouseDown : .otherMouseUp,
+            mouseCursorPosition: location,
+            mouseButton: .center
+        ) else { return }
+        event.setIntegerValueField(.mouseEventButtonNumber, value: buttonNumber)
+        event.post(tap: .cghidEventTap)
     }
 
     // MARK: - Keystrokes
@@ -459,9 +557,9 @@ final class ActionEngine {
 }
 
 /// Weak box so ActionEngine can call features without ownership cycle.
-final class MxFeaturesBox {
-    var features: MxFeatures
-    init(_ features: MxFeatures) { self.features = features }
+final class DeviceFeaturesBox {
+    var features: DeviceFeatures
+    init(_ features: DeviceFeatures) { self.features = features }
 }
 
 // NX key type constants (from IOKit/hidsystem/ev_keymap.h)

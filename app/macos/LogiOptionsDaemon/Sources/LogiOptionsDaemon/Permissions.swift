@@ -1,6 +1,4 @@
 import ApplicationServices
-import AppKit
-import Foundation
 import IOKit.hid
 
 /// Daemon-side permission checks.
@@ -25,50 +23,30 @@ enum Permissions {
     return true
   }
 
-  /// Prompt Accessibility at most once; open Settings without sticky re-prompts.
-  static func requestForDaemon() {
+  /// Startup checks are deliberately read-only. System Settings is opened only
+  /// by the user's explicit Grant action in the Flutter app.
+  static func checkForDaemon() {
+    let message = accessibilityTrusted()
+      ? "Accessibility already granted"
+      : "Accessibility missing — waiting for explicit Grant action"
+    DaemonLog.info(message)
+  }
+
+  static func shouldRequestFromUser(arguments: [String]) -> Bool {
+    arguments.contains("--request-accessibility")
+  }
+
+  /// Called only after an explicit Grant or Start-daemon action.
+  static func requestForDaemonFromUser() {
     if accessibilityTrusted() {
       DaemonLog.info("Accessibility already granted")
       return
     }
-    // Register for PostEvent (same TCC family as Accessibility on some builds).
     _ = IOHIDRequestAccess(kIOHIDRequestTypePostEvent)
-    // Do not pass prompt:true every launch — that re-shows the lock sheet.
-    let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
-    let ax = AXIsProcessTrustedWithOptions(opts)
-    DaemonLog.info("Accessibility check → trusted=\(ax) (Settings only if still missing)")
-    if !accessibilityTrusted() {
-      openPrivacyPane(anchor: "Privacy_Accessibility")
-      startTrustPolling()
-    }
-  }
-
-  private static var pollTimer: Timer?
-
-  private static func startTrustPolling() {
-    pollTimer?.invalidate()
-    pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { t in
-      if accessibilityTrusted() {
-        DaemonLog.info("Accessibility granted (daemon poll)")
-        t.invalidate()
-        pollTimer = nil
-      }
-    }
-    if let pollTimer {
-      RunLoop.main.add(pollTimer, forMode: .common)
-    }
-  }
-
-  private static func openPrivacyPane(anchor: String) {
-    let candidates = [
-      "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?\(anchor)",
-      "x-apple.systempreferences:com.apple.preference.security?\(anchor)",
-    ]
-    for c in candidates {
-      if let url = URL(string: c), NSWorkspace.shared.open(url) {
-        DaemonLog.info("opened Settings \(anchor)")
-        return
-      }
-    }
+    let options = [
+      kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true,
+    ] as CFDictionary
+    let trusted = AXIsProcessTrustedWithOptions(options)
+    DaemonLog.info("User-requested Accessibility registration → trusted=\(trusted)")
   }
 }

@@ -32,7 +32,11 @@ if lockFd >= 0 {
 }
 
 DaemonLog.info("LogiOptionsDaemon starting (pid \(ProcessInfo.processInfo.processIdentifier))")
-Permissions.requestForDaemon()
+if Permissions.shouldRequestFromUser(arguments: args) {
+    Permissions.requestForDaemonFromUser()
+} else {
+    Permissions.checkForDaemon()
+}
 // If the user enabled “Start at login”, re-load the LaunchAgent after a manual
 // Stop (stopSession bootouts the job but keeps the plist).
 LoginAgent.ensureLoadedWithCurrentBinary()

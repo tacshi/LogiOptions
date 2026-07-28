@@ -19,5 +19,9 @@ let package = Package(
                 .linkedFramework("UserNotifications"),
             ]
         ),
+        .testTarget(
+            name: "LogiOptionsDaemonTests",
+            dependencies: ["LogiOptionsDaemon"]
+        ),
     ]
 )
