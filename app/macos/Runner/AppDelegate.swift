@@ -5,21 +5,58 @@ import Darwin
 @main
 class AppDelegate: FlutterAppDelegate {
   private static var didAttemptDaemonStart = false
+  private var applicationsChannel: FlutterMethodChannel?
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
     super.applicationDidFinishLaunching(notification)
-    _ = Permissions.requestMissing(openSettingsIfNeeded: false)
+    registerApplicationsChannel()
+    _ = Permissions.current()
     startDaemonIfNeeded()
   }
 
+  private func registerApplicationsChannel() {
+    guard
+      let controller = mainFlutterWindow?.contentViewController as? FlutterViewController
+    else {
+      NSLog("[LogiOptions] Flutter view unavailable for applications channel")
+      return
+    }
+    let channel = FlutterMethodChannel(
+      name: "com.logioptions/applications",
+      binaryMessenger: controller.engine.binaryMessenger
+    )
+    channel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "listInstalled":
+        DispatchQueue.global(qos: .userInitiated).async {
+          let applications = InstalledApplications.scan()
+          DispatchQueue.main.async { result(applications) }
+        }
+      case "browse":
+        InstalledApplications.browse(result: result)
+      case "browseFile":
+        InstalledApplications.browseFile(result: result)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    applicationsChannel = channel
+  }
+
   func startDaemonIfNeeded() {
-    ensureDaemonRunning(force: false)
+    ensureDaemonRunning(force: false, requestAccessibility: false)
   }
 
   /// Start (or restart) the daemon — used after Settings → Stop.
   @discardableResult
-  func startDaemon(force: Bool = true) -> Bool {
-    ensureDaemonRunning(force: force)
+  func startDaemon(
+    force: Bool = true,
+    requestAccessibility: Bool = false
+  ) -> Bool {
+    ensureDaemonRunning(
+      force: force,
+      requestAccessibility: requestAccessibility
+    )
     // Poll until RPC socket is up (openApplication / nohup are async).
     for _ in 0..<25 {
       if isSocketLive() { return true }
@@ -45,7 +82,10 @@ class AppDelegate: FlutterAppDelegate {
 
   // MARK: - Embedded daemon
 
-  private func ensureDaemonRunning(force: Bool) {
+  private func ensureDaemonRunning(
+    force: Bool,
+    requestAccessibility: Bool
+  ) {
     if !force && Self.didAttemptDaemonStart { return }
     Self.didAttemptDaemonStart = true
 
@@ -54,7 +94,7 @@ class AppDelegate: FlutterAppDelegate {
       return
     }
 
-    if isSocketLive() && !daemonPIDs().isEmpty {
+    if !force && isSocketLive() && !daemonPIDs().isEmpty {
       NSLog("[LogiOptions] daemon already running — keep it")
       return
     }
@@ -66,7 +106,10 @@ class AppDelegate: FlutterAppDelegate {
     }
     try? FileManager.default.removeItem(atPath: "/tmp/logioptions.sock")
     try? FileManager.default.removeItem(atPath: "/tmp/logioptions.daemon.lock")
-    launchDetached(daemonURL)
+    launchDetached(
+      daemonURL,
+      requestAccessibility: requestAccessibility
+    )
   }
 
   private func stopExistingDaemons() {
@@ -131,7 +174,10 @@ class AppDelegate: FlutterAppDelegate {
 
   /// Always launch via nohup on the in-app binary (reliable + logged).
   /// Prefer the binary inside LogiOptionsDaemon.app for UserNotifications.
-  private func launchDetached(_ daemonURL: URL) {
+  private func launchDetached(
+    _ daemonURL: URL,
+    requestAccessibility: Bool
+  ) {
     let outPath = "/tmp/logioptions.daemon.out.log"
     let errPath = "/tmp/logioptions.daemon.err.log"
     if !FileManager.default.fileExists(atPath: outPath) {
@@ -152,15 +198,28 @@ class AppDelegate: FlutterAppDelegate {
     }
 
     NSLog("[LogiOptions] launching daemon: \(exec.path)")
-    launchNohup(exec, outPath: outPath, errPath: errPath)
+    launchNohup(
+      exec,
+      outPath: outPath,
+      errPath: errPath,
+      requestAccessibility: requestAccessibility
+    )
   }
 
-  private func launchNohup(_ daemonURL: URL, outPath: String, errPath: String) {
+  private func launchNohup(
+    _ daemonURL: URL,
+    outPath: String,
+    errPath: String,
+    requestAccessibility: Bool
+  ) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    let permissionArgument = requestAccessibility
+      ? " --request-accessibility"
+      : ""
     process.arguments = [
       "-c",
-      "nohup \"\(daemonURL.path)\" >>\"\(outPath)\" 2>>\"\(errPath)\" </dev/null & disown || true",
+      "nohup \"\(daemonURL.path)\"\(permissionArgument) >>\"\(outPath)\" 2>>\"\(errPath)\" </dev/null & disown || true",
     ]
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
@@ -188,5 +247,92 @@ class AppDelegate: FlutterAppDelegate {
       return aux
     }
     return nil
+  }
+}
+
+private enum InstalledApplications {
+  static func scan() -> [[String: Any]] {
+    let manager = FileManager.default
+    let roots = [
+      URL(fileURLWithPath: "/Applications", isDirectory: true),
+      URL(fileURLWithPath: "/System/Applications", isDirectory: true),
+      manager.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true),
+    ]
+    var seen = Set<String>()
+    var results: [[String: Any]] = []
+    for root in roots where manager.fileExists(atPath: root.path) {
+      guard let enumerator = manager.enumerator(
+        at: root,
+        includingPropertiesForKeys: [.isApplicationKey, .isDirectoryKey],
+        options: [.skipsHiddenFiles, .skipsPackageDescendants]
+      ) else { continue }
+      for case let url as URL in enumerator where url.pathExtension.lowercased() == "app" {
+        guard let application = record(for: url),
+              let bundleId = application["bundleId"] as? String,
+              seen.insert(bundleId).inserted else { continue }
+        results.append(application)
+      }
+    }
+    return results.sorted {
+      ($0["name"] as? String ?? "").localizedCaseInsensitiveCompare(
+        $1["name"] as? String ?? ""
+      ) == .orderedAscending
+    }
+  }
+
+  static func browse(result: @escaping FlutterResult) {
+    let panel = NSOpenPanel()
+    panel.title = "Choose an application"
+    panel.prompt = "Add Application"
+    panel.allowedFileTypes = ["app"]
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+    panel.begin { response in
+      guard response == .OK, let url = panel.url else {
+        result(nil)
+        return
+      }
+      result(record(for: url))
+    }
+  }
+
+  static func browseFile(result: @escaping FlutterResult) {
+    let panel = NSOpenPanel()
+    panel.title = "Choose a file"
+    panel.prompt = "Choose"
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.begin { response in
+      result(response == .OK ? panel.url?.path : nil)
+    }
+  }
+
+  private static func record(for url: URL) -> [String: Any]? {
+    guard let bundle = Bundle(url: url),
+          let bundleId = bundle.bundleIdentifier else { return nil }
+    let name = (
+      bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+        ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+        ?? url.deletingPathExtension().lastPathComponent
+    )
+    let icon = NSWorkspace.shared.icon(forFile: url.path)
+    icon.size = NSSize(width: 64, height: 64)
+    var iconData: Data?
+    if let tiff = icon.tiffRepresentation,
+       let bitmap = NSBitmapImageRep(data: tiff) {
+      iconData = bitmap.representation(using: .png, properties: [:])
+    }
+    var record: [String: Any] = [
+      "bundleId": bundleId,
+      "name": name,
+      "path": url.path,
+    ]
+    if let iconData {
+      record["icon"] = FlutterStandardTypedData(bytes: iconData)
+    }
+    return record
   }
 }

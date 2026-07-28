@@ -4,10 +4,20 @@ import 'dart:io';
 
 import 'models.dart';
 
+class DaemonRpcException implements Exception {
+  const DaemonRpcException(this.code, this.message);
+
+  final String code;
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// Line-delimited JSON-RPC client to LogiOptionsDaemon Unix socket.
 class DaemonClient {
   DaemonClient({String? socketPath})
-      : socketPath = socketPath ?? _defaultSocketPath();
+    : socketPath = socketPath ?? _defaultSocketPath();
 
   final String socketPath;
   Socket? _socket;
@@ -87,7 +97,17 @@ class DaemonClient {
       if (id is int && _pending.containsKey(id)) {
         final c = _pending.remove(id)!;
         if (map['error'] != null) {
-          c.completeError(StateError(map['error'].toString()));
+          final error = map['error'];
+          if (error is Map) {
+            c.completeError(
+              DaemonRpcException(
+                error['code']?.toString() ?? 'rpc_error',
+                error['message']?.toString() ?? 'Daemon request failed.',
+              ),
+            );
+          } else {
+            c.completeError(DaemonRpcException('rpc_error', error.toString()));
+          }
         } else {
           final result = map['result'];
           c.complete(
@@ -134,39 +154,68 @@ class DaemonClient {
 
   Future<DeviceState> getStatus() async {
     final r = await call('getStatus');
-    return DeviceState(
-      connected: r['connected'] as bool? ?? false,
-      name: r['deviceName'] as String? ?? 'No device',
-      modelId: r['modelId'] as String? ?? '2b034',
-      connection: _connection(r['connection'] as String?),
-      batteryPercent: r['batteryPercent'] as int?,
-      charging: r['charging'] as bool? ?? false,
-      dpi: r['dpi'] as int? ?? 1000,
-      smartShiftEnabled: r['smartShiftEnabled'] as bool? ?? true,
-      smartShiftThreshold: r['smartShiftThreshold'] as int? ?? 10,
-      hiresWheel: r['hiresWheel'] as bool? ?? true,
-      invertWheel: r['invertWheel'] as bool? ?? false,
-      scrollSpeed: (r['scrollSpeed'] as num?)?.toDouble() ?? 1.0,
-      thumbInvert: r['thumbInvert'] as bool? ?? false,
-      thumbSpeed: (r['thumbSpeed'] as num?)?.toDouble() ?? 1.0,
-      daemonOnline: r['daemonOnline'] as bool? ?? true,
-      optionsPlusRunning: r['optionsPlusRunning'] as bool? ?? false,
-      loginAtStartup: r['loginAtStartup'] as bool? ?? false,
-      accessibilityTrusted: r['accessibilityTrusted'] as bool? ?? false,
-      inputMonitoringTrusted: r['inputMonitoringTrusted'] as bool? ?? false,
-    );
+    return DeviceState.fromJson(r);
   }
 
-  ConnectionType _connection(String? s) {
-    switch (s) {
-      case 'ble':
-        return ConnectionType.ble;
-      case 'bolt':
-        return ConnectionType.bolt;
-      default:
-        return ConnectionType.unknown;
-    }
+  Future<AppSnapshot> getSnapshot() async {
+    final response = await call('getSnapshot');
+    return AppSnapshot.fromJson(response);
   }
+
+  Future<AppSnapshot> selectDevice({
+    required String deviceId,
+    required int expectedRevision,
+  }) async {
+    final response = await call('selectDevice', {
+      'deviceId': deviceId,
+      'expectedRevision': expectedRevision,
+    });
+    return AppSnapshot.fromJson(response);
+  }
+
+  Future<AppSnapshot> rescanDevices() async {
+    final response = await call('rescanDevices');
+    return AppSnapshot.fromJson(response);
+  }
+
+  Future<bool> requestAccessibility() async {
+    final response = await call('requestAccessibility');
+    return response['ok'] as bool? ?? false;
+  }
+
+  Future<Map<String, dynamic>> putProfile({
+    required String deviceId,
+    required ProfileSettings profile,
+    required int expectedRevision,
+    String? bundleId,
+    ApplicationIdentity? application,
+  }) => call('putProfile', {
+    'deviceId': deviceId,
+    'profile': profile.toJson(),
+    'expectedRevision': expectedRevision,
+    'bundleId': ?bundleId,
+    if (application != null) 'application': application.toJson(),
+  });
+
+  Future<Map<String, dynamic>> deleteProfile({
+    required String deviceId,
+    required String bundleId,
+    required int expectedRevision,
+  }) => call('deleteProfile', {
+    'deviceId': deviceId,
+    'bundleId': bundleId,
+    'expectedRevision': expectedRevision,
+  });
+
+  Future<Map<String, dynamic>> patchDeviceSettings({
+    required String deviceId,
+    required Map<String, dynamic> settings,
+    required int expectedRevision,
+  }) => call('patchDeviceSettings', {
+    'deviceId': deviceId,
+    'settings': settings,
+    'expectedRevision': expectedRevision,
+  });
 
   Future<void> setDpi(int dpi) => call('setDpi', {'dpi': dpi});
 

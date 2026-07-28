@@ -5,9 +5,11 @@ class DaemonLifecycle {
   static const _channel = MethodChannel('com.logioptions/daemon');
 
   /// Launch the embedded LogiOptionsDaemon (Settings → Start after Stop).
-  Future<bool> start() async {
+  Future<bool> start({bool requestAccessibility = false}) async {
     try {
-      final m = await _channel.invokeMapMethod<String, dynamic>('start');
+      final m = await _channel.invokeMapMethod<String, dynamic>('start', {
+        'requestAccessibility': requestAccessibility,
+      });
       return m?['ok'] as bool? ?? false;
     } catch (_) {
       return false;

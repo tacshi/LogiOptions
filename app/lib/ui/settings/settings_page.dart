@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../data/models.dart';
 
@@ -29,9 +30,7 @@ class SettingsPage extends StatelessWidget {
         Text(
           online ? 'Running' : 'Stopped',
           style: theme.textTheme.bodyMedium?.copyWith(
-            color: online
-                ? theme.colorScheme.primary
-                : theme.colorScheme.error,
+            color: online ? theme.colorScheme.primary : theme.colorScheme.error,
             fontWeight: FontWeight.w600,
           ),
         ),
@@ -82,7 +81,98 @@ class SettingsPage extends StatelessWidget {
             ],
           ),
         ),
+        const SizedBox(height: 20),
+        Text('Support diagnostics', style: theme.textTheme.titleLarge),
+        const SizedBox(height: 8),
+        Card(
+          elevation: 0,
+          child: Column(
+            children: [
+              ListTile(
+                dense: true,
+                title: const Text('Selected device'),
+                subtitle: Text(
+                  '${state.name}\n'
+                  'Model ${state.modelId} · ${_transportLabel(state.connection)}',
+                ),
+                isThreeLine: true,
+              ),
+              const Divider(height: 1),
+              ListTile(
+                dense: true,
+                title: const Text('Runtime features'),
+                subtitle: Text(_capabilitySummary(state.capabilities)),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                dense: true,
+                title: const Text('Programmable controls'),
+                subtitle: Text(
+                  state.controls.isEmpty
+                      ? 'None reported'
+                      : state.controls
+                            .map(
+                              (control) =>
+                                  '${control.label} (${control.cidHex})',
+                            )
+                            .join(', '),
+                ),
+                trailing: TextButton.icon(
+                  onPressed: () {
+                    Clipboard.setData(
+                      ClipboardData(text: _diagnosticsText(state)),
+                    );
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Diagnostics copied.')),
+                    );
+                  },
+                  icon: const Icon(Icons.copy, size: 17),
+                  label: const Text('Copy'),
+                ),
+              ),
+            ],
+          ),
+        ),
       ],
     );
   }
+
+  static String _transportLabel(ConnectionType connection) =>
+      switch (connection) {
+        ConnectionType.ble => 'Bluetooth',
+        ConnectionType.bolt => 'Logi Bolt',
+        ConnectionType.usb => 'USB',
+        ConnectionType.receiver => 'USB receiver',
+        ConnectionType.unknown => 'Unknown transport',
+      };
+
+  static String _capabilitySummary(DeviceCapabilities capabilities) {
+    final values = <String>[
+      if (capabilities.battery) 'battery',
+      if (capabilities.dpi != null)
+        'DPI ${capabilities.dpi!.minimum}–${capabilities.dpi!.maximum}',
+      if (capabilities.hiResWheel) 'high-resolution wheel',
+      if (capabilities.smartShift) 'SmartShift',
+      if (capabilities.thumbWheel) 'thumb wheel',
+      if (capabilities.haptics) 'haptics',
+      if (capabilities.forceSensing) 'force sensing',
+    ];
+    return values.isEmpty
+        ? 'No adjustable features reported'
+        : values.join(', ');
+  }
+
+  static String _diagnosticsText(DeviceState state) => [
+    'LogiOptions diagnostics',
+    'daemon=${state.daemonOnline ? "running" : "stopped"}',
+    'connected=${state.connected}',
+    'device=${state.name}',
+    'deviceId=${state.deviceId ?? "none"}',
+    'model=${state.modelId}',
+    'transport=${_transportLabel(state.connection)}',
+    'verification=${state.verified ? "verified" : "compatible-untested"}',
+    'features=${_capabilitySummary(state.capabilities)}',
+    'controls=${state.controls.map((item) => '${item.cidHex}:${item.label}').join(",")}',
+    'accessibility=${state.accessibilityTrusted}',
+  ].join('\n');
 }

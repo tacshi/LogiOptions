@@ -24,10 +24,8 @@ class MainFlutterWindow: NSWindow {
       app.startDaemonIfNeeded()
     }
 
-    // Accessibility only — open Settings once if missing (no sticky dual prompts).
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-      _ = Permissions.requestMissing(openSettingsIfNeeded: true)
-    }
+    // Startup is read-only. System Settings opens only after the user taps
+    // the in-app Grant button.
   }
 
   deinit {
@@ -95,7 +93,13 @@ class MainFlutterWindow: NSWindow {
           result(FlutterError(code: "no_delegate", message: "AppDelegate missing", details: nil))
           return
         }
-        let ok = app.startDaemon(force: true)
+        let arguments = call.arguments as? [String: Any]
+        let requestAccessibility =
+          arguments?["requestAccessibility"] as? Bool ?? false
+        let ok = app.startDaemon(
+          force: true,
+          requestAccessibility: requestAccessibility
+        )
         result(["ok": ok])
       case "isRunning":
         // Best-effort: socket probe is owned by AppDelegate; reuse start path checks via pgrep.
