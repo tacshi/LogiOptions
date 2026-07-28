@@ -59,7 +59,8 @@ flutter:
 
   assets:
     - assets/brand/
-    - assets/devices/mx_master_3s/
+    - assets/devices/catalog/
+    - assets/devices/editor/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
