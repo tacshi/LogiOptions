@@ -2,6 +2,12 @@ import AppKit
 import Foundation
 import IOKit.hid
 
+enum DeviceReconnectPolicy {
+    static func shouldReconnect(hasActiveDevice: Bool) -> Bool {
+        !hasActiveDevice
+    }
+}
+
 final class Daemon {
     private var config: AppConfig
     private let deviceService = DeviceService()
@@ -32,7 +38,6 @@ final class Daemon {
     private var thumbActionAccumulator: Int = 0
     private var thumbActionStep: Int = 8
     private var lastThumbActionAt = Date.distantPast
-    private var lastDeviceRescanAt = Date.distantPast
 
     /// Shared so signal handlers can undivert the wheel before exit.
     private static weak var shared: Daemon?
@@ -118,7 +123,6 @@ final class Daemon {
     // MARK: - Device
 
     private func connectDevice() {
-        lastDeviceRescanAt = Date()
         restoreNativeScroll()
         device = nil
         features = nil
@@ -161,6 +165,20 @@ final class Daemon {
         dev.onNotification = { [weak self] featureIndex, function, params in
             self?.handleNotification(featureIndex: featureIndex, function: function, params: params)
         }
+        dev.onRemoval = { [weak self, weak dev] in
+            guard let self, let dev, self.device === dev else { return }
+            DaemonLog.info("HID++ device removed — waiting to reconnect")
+            self.releaseHeldMouseButtons()
+            self.device = nil
+            self.features = nil
+            self.featuresBox = nil
+            self.engine.features = nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.device == nil else { return }
+                self.connectDevice()
+                self.refreshStatusCache()
+            }
+        }
 
         applyProfile(forBundleId: focus.frontBundleId)
         if let bat = feat.readBattery() {
@@ -179,8 +197,7 @@ final class Daemon {
         reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.checkOptionsPlus()
-            if self.device == nil
-                || Date().timeIntervalSince(self.lastDeviceRescanAt) >= 30 {
+            if DeviceReconnectPolicy.shouldReconnect(hasActiveDevice: self.device != nil) {
                 self.connectDevice()
                 self.refreshStatusCache()
             }

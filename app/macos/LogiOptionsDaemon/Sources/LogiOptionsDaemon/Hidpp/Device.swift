@@ -44,6 +44,8 @@ final class HidppDevice: HidppRequesting {
 
     /// Unmatched HID++ notifications (divert, wheel, etc.).
     var onNotification: ((UInt8 /* featureIndex */, UInt8 /* function */, Data /* params */) -> Void)?
+    /// The underlying HID interface was physically removed.
+    var onRemoval: (() -> Void)?
 
     var isReceiver: Bool {
         name.localizedCaseInsensitiveContains("receiver")
@@ -86,10 +88,20 @@ final class HidppDevice: HidppRequesting {
             },
             ctx
         )
+        IOHIDDeviceRegisterRemovalCallback(
+            device,
+            { context, _, _ in
+                guard let context else { return }
+                let me = Unmanaged<HidppDevice>.fromOpaque(context).takeUnretainedValue()
+                me.onRemoval?()
+            },
+            ctx
+        )
         IOHIDDeviceScheduleWithRunLoop(device, runLoop, CFRunLoopMode.defaultMode.rawValue)
     }
 
     deinit {
+        IOHIDDeviceRegisterRemovalCallback(device, nil, nil)
         IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         IOHIDDeviceClose(device, 0)
         reportPtr.deallocate()
