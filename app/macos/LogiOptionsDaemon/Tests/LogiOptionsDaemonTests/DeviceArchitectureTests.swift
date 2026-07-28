@@ -2,6 +2,16 @@
 import Foundation
 import XCTest
 
+final class DeviceReconnectPolicyTests: XCTestCase {
+    func testHealthyDeviceIsNotPeriodicallyReconnected() {
+        XCTAssertFalse(DeviceReconnectPolicy.shouldReconnect(hasActiveDevice: true))
+    }
+
+    func testMissingDeviceIsRetried() {
+        XCTAssertTrue(DeviceReconnectPolicy.shouldReconnect(hasActiveDevice: false))
+    }
+}
+
 final class DeviceRegistryTests: XCTestCase {
     func testCurrentPointingDeviceCatalogHasExpectedCoverage() {
         XCTAssertEqual(DeviceRegistry.entries.count, 63)
