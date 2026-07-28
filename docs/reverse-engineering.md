@@ -1,61 +1,94 @@
-# Reverse Engineering Notes — Logi Options+ → MX Master 3S
+# Clean-room protocol and catalog research
 
-Captured from the installed Options+ **2.5.926888** on this Mac (2026-07-24).
+This document records the boundary between factual compatibility research and
+shipped LogiOptions code/assets.
 
-## Process architecture
+## Sources and handling
 
-| Component | Path / identity | Role |
-|-----------|-----------------|------|
-| Electron UI | `/Applications/logioptionsplus.app` | Settings UI only |
-| Native agent | `logioptionsplus_agent` (LaunchAgent `com.logi.cp-dev-mgr`) | HID++, remaps, macros, focus |
-| LogiVoice | `logioptionsplus_logivoice` | Voice features (unneeded) |
-| Updater | `logioptionsplus_updater` | Auto-update |
+- Logitech's
+  [Options+ supported-device list](https://support.logi.com/hc/en-gb/articles/25528092585879-Supported-devices-Logi-Options)
+  defines the current pointing-device scope.
+- Logitech's
+  [MX Master 4 setup documentation](https://support.logi.com/hc/en-hk/articles/28321445268247-Getting-Started-MX-Master-4)
+  defines the advertised Haptic Sense behaviour.
+- A leftover local `devices.json` catalog was used to enumerate factual model
+  names and IDs. It is not copied into the repository or app bundle.
+- Official device depots were inspected for protocol research and matching
+  product renders. Depot archives were not installed or committed; only the
+  selected device-render PNGs used by the UI are bundled.
+- Public HID++ implementations, especially Solaar, were consulted for request
+  framing and feature semantics. LogiOptions independently implements the
+  protocol and does not vendor their source.
 
-IPC: Unix sockets `/tmp/logitech_kiros_agent-*`, TCP listen port (ephemeral).
+Do not commit Logitech binaries, encrypted depot archives, keys, raw catalogs,
+settings databases, or serial numbers. Official product-render PNGs may be
+added only when they map to a supported catalog model/colour and are referenced
+by the UI. Sanitized protocol fixtures may contain only request/response bytes
+needed by a unit test.
 
-Agent binary contains Logitech **`devio`** HID++ stack (`MacOSBus`, `MacOSDevice`, `IFeatureXXXX…`) over **IOHIDManager**.
+## Observed Options+ architecture
+
+The previously installed Options+ build used an Electron settings UI, a native
+device-management agent, voice components, and an updater. The agent owned
+vendor HID reports through IOHID and maintained its own application/profile
+database. Only one device manager can reliably own the HID++ report interface,
+so Options+ must be stopped before LogiOptions controls the same hardware.
 
 ## Device identity
 
-- **Display name:** MX Master 3S  
-- **modelId:** `2b034`  
-- **Slot prefix:** `mx-master-3s-2b034`  
-- **Depot package:** `/Library/Application Support/Logi/LogiOptionsPlus/depots/*/mx_master_3s/`  
-- User device serial (this machine): `2331LZ52HFS8`  
-- Connection types observed: **BLE_PRO**, Logi **Bolt** receiver `c547`
+Stable identity priority in LogiOptions is:
 
-## Control IDs (Special Keys 0x1B04)
+1. HID++ unit ID
+2. device or receiver-pairing serial
+3. IORegistry interface identity
+4. model + receiver slot only as a migration fallback
 
-| CID | Decimal | Slot |
-|-----|---------|------|
-| 0x52 | 82 | Middle / wheel click |
-| 0x53 | 83 | Back |
-| 0x56 | 86 | Forward |
-| 0xC3 | 195 | Gesture (thumb) |
-| 0xC4 | 196 | Mode-shift (top) |
+Exact Options+ catalog product IDs and known Options+ receiver IDs are checked
+before any HID interface is opened. Direct Bluetooth/USB interfaces and all six
+responsive receiver slots passing that allowlist are probed. Duplicate
+interfaces with the same stable identity are collapsed. This keeps G-series
+gaming devices untouched without maintaining a model-name blacklist.
 
-UI geometry: `core_metadata.json` in the device depot.
+The project registry contains model names, model IDs, expected controls, DPI
+ranges, chassis keys, and known capabilities. Those entries are hints; runtime
+HID++ probing remains authoritative for exposed and writable settings.
 
-## HID++ features we implement
+## Implemented protocol surfaces
 
-| ID | Name | Use |
-|----|------|-----|
-| 0x0000 | Root | GetFeature |
-| 0x0001 | FeatureSet | Enumerate |
-| 0x1B04 | ReprogControlsV4 / SpecialKeys | Divert buttons |
-| 0x2110 / 0x2111 | SmartShift | MagSpeed ratchet |
-| 0x2121 | HiResWheel | Hi-res / invert |
-| 0x2150 | Thumbwheel | Divert / invert |
-| 0x2201 / 0x2202 | Adjustable DPI | Sensor DPI |
-| 0x1000 / 0x1004 | Battery | Level |
+| Feature | ID / register | Use |
+|---|---:|---|
+| Root / FeatureSet | `0x0000` / `0x0001` | HID++ 2 probing |
+| Device info / name | `0x0003` / `0x0005` | stable identity and display |
+| Battery | `0x1000`, `0x1004` | level and charging |
+| Reprogrammable controls | `0x1B04` | controls, diversion, raw gesture movement |
+| SmartShift | `0x2110`, `0x2111` | ratchet/free-spin settings |
+| High-resolution wheel | `0x2121` | resolution, inversion, diversion |
+| Thumb wheel | `0x2150` | scrolling or directional actions |
+| Adjustable DPI | `0x2201`, `0x2202` | sensor resolution |
+| Haptics | `0x19B0` | MX Master 4 level and selection waveform |
+| Force sensing | `0x19C0` | MX Master 4 threshold |
+| HID++ 1 battery | registers `0x07`, `0x0D` | safe legacy status |
+| Receiver pairing info | register `0x2B5` | slot model and serial identity |
 
-Protocol knowledge primarily from [Solaar](https://github.com/pwr-Solaar/Solaar) (GPL) and public HID++ 2.0 docs — not from decompiling the agent.
+MX Master 4 request bytes used by tests are sanitized protocol fixtures. They
+do not include any device serial, encryption material, package content, or
+Logitech asset.
 
-## Settings store
+## Artwork
 
-`~/Library/Application Support/LogiOptionsPlus/settings.db`  
-Table `data.file` is a large JSON document: profiles, applications, battery cache, easy_switch hosts.
+Device views use official Options+ product-render PNGs selected by exact model
+ID and extended-model colour variant. MX Master 3 and MX Master 3S use their
+full-resolution editor renders; other supported models use the corresponding
+catalog thumbnail. If an official colour asset is unavailable, the UI falls
+back to that model's official core render and only then to a neutral drawing.
 
-## Exclusive access
+## Verification
 
-Only one process should open HID++ vendor reports. Stop official Options+ before running LogiOptions (see `teardown-options-plus.md`).
+Compatibility means the model is in the official scope and its runtime HID++
+features can be safely probed. It does not imply hardware validation.
+
+- MX Master 3S (`2b034`, `2b043`): Verified
+- MX Master 4 and all other registry entries: Compatible—untested
+
+Promote a model to Verified only after its controls and every advertised feature
+pass a physical-device test.

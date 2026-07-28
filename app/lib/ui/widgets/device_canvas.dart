@@ -1,40 +1,31 @@
 import 'package:flutter/material.dart';
 
 import '../../data/models.dart';
+import 'device_illustration.dart';
 
-/// Side-view device art from Options+ depot (`side_core.png`) with hotspot markers.
-///
-/// Marker positions come from Options+ `core_metadata.json` (percent of image).
+/// Product artwork with capability-derived control hotspots.
 class DeviceCanvas extends StatelessWidget {
   const DeviceCanvas({
     super.key,
+    required this.state,
     required this.selected,
     required this.onSelect,
   });
 
-  final ControlId? selected;
-  final ValueChanged<ControlId> onSelect;
-
-  /// Options+ `device_buttons_image` markers (percent of 636×1024 art).
-  static const _layout = <ControlId, Offset>{
-    ControlId.middle: Offset(71, 15),
-    ControlId.modeShift: Offset(81, 34),
-    ControlId.forward: Offset(35, 43),
-    ControlId.back: Offset(45, 60),
-    ControlId.gesture: Offset(8, 58),
-    // Thumb wheel shown as non-button; skip hotspot or place near art
-  };
-
-  static const _imageAsset = 'assets/devices/mx_master_3s/side_core.png';
+  final DeviceState state;
+  final DeviceControl? selected;
+  final ValueChanged<DeviceControl> onSelect;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Art is portrait (~636×1024). Fit height-first, center horizontally.
         final maxH = constraints.maxHeight;
         final maxW = constraints.maxWidth;
-        const aspect = 636 / 1024;
+        final modelId = state.modelId.toLowerCase();
+        final aspect = {'6b023', '2b034', '2b043'}.contains(modelId)
+            ? 636 / 1024
+            : 2 / 3;
         double h = maxH;
         double w = h * aspect;
         if (w > maxW) {
@@ -49,21 +40,19 @@ class DeviceCanvas extends StatelessWidget {
               clipBehavior: Clip.none,
               children: [
                 Positioned.fill(
-                  child: Image.asset(
-                    _imageAsset,
-                    fit: BoxFit.contain,
-                    filterQuality: FilterQuality.high,
-                    errorBuilder: (_, __, ___) => _FallbackBody(theme: Theme.of(context)),
+                  child: DeviceIllustration(
+                    artworkKey: state.artworkKey,
+                    modelId: state.modelId,
                   ),
                 ),
-                for (final entry in _layout.entries)
+                for (final control in state.controls)
                   Positioned(
-                    left: w * (entry.value.dx / 100) - 14,
-                    top: h * (entry.value.dy / 100) - 14,
+                    left: w * control.x - 14,
+                    top: h * control.y - 14,
                     child: _Hotspot(
-                      label: entry.key.label,
-                      selected: selected == entry.key,
-                      onTap: () => onSelect(entry.key),
+                      label: control.label,
+                      selected: selected?.cid == control.cid,
+                      onTap: () => onSelect(control),
                     ),
                   ),
               ],
@@ -71,23 +60,6 @@ class DeviceCanvas extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-class _FallbackBody extends StatelessWidget {
-  const _FallbackBody({required this.theme});
-  final ThemeData theme;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(48),
-      ),
-      alignment: Alignment.center,
-      child: Icon(Icons.mouse, size: 64, color: theme.colorScheme.outline),
     );
   }
 }

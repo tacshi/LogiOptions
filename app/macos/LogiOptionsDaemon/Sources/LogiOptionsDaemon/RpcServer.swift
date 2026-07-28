@@ -120,10 +120,17 @@ final class RpcServer {
         if result["__notification"] as? Bool == true {
             return nil
         }
-        if let err = result["error"] as? String, result["ok"] as? Bool == false {
+        if result["ok"] as? Bool == false,
+           let error = result["error"] {
+            let payload: [String: Any]
+            if let structured = error as? [String: Any] {
+                payload = structured
+            } else {
+                payload = ["code": "daemon_error", "message": String(describing: error)]
+            }
             return encode([
                 "jsonrpc": "2.0",
-                "error": ["code": -32000, "message": err],
+                "error": payload,
                 "id": id as Any,
             ])
         }

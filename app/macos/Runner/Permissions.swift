@@ -10,9 +10,8 @@ import IOKit.hid
 /// Logitech HID++ device via IOHID and inject events — we do not listen to
 /// global key/mouse taps from other apps.
 ///
-/// The system “would like to control this computer” sheet cannot be closed by
-/// third-party code. We avoid re-showing it: open System Settings once, then
-/// poll until granted so the in-app banner clears automatically.
+/// Startup only reads trust. The explicit in-app Grant action opens System
+/// Settings, then polling clears the banner after the user grants access.
 enum Permissions {
   struct Status {
     var accessibility: Bool
@@ -28,7 +27,6 @@ enum Permissions {
     case inputMonitoring
   }
 
-  private static var didOfferAccessibilityThisSession = false
   private static var trustPollTimer: Timer?
 
   static func current() -> Status {
@@ -38,40 +36,8 @@ enum Permissions {
     )
   }
 
-  /// Offer Accessibility at most once per process; open Settings (no repeated modal).
-  @discardableResult
-  static func requestMissing(openSettingsIfNeeded: Bool = true) -> Status {
-    if accessibilityGranted() {
-      stopTrustPolling()
-      return current()
-    }
-
-    // Prefer Settings deep-link over AX prompt sheet — the sheet sticks around
-    // after the user toggles access on and cannot be dismissed by us.
-    if openSettingsIfNeeded && !didOfferAccessibilityThisSession {
-      didOfferAccessibilityThisSession = true
-      // One quiet AX registration (no prompt sheet if already listed).
-      let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
-      _ = AXIsProcessTrustedWithOptions(opts)
-      _ = IOHIDRequestAccess(kIOHIDRequestTypePostEvent)
-      openSystemSettings(pane: .accessibility)
-      startTrustPolling()
-      NSLog("[LogiOptions] Accessibility: opened Settings (no sticky prompt sheet)")
-    } else if !didOfferAccessibilityThisSession {
-      // Explicit request without Settings (e.g. early launch).
-      didOfferAccessibilityThisSession = true
-      let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-      _ = AXIsProcessTrustedWithOptions(opts)
-      _ = IOHIDRequestAccess(kIOHIDRequestTypePostEvent)
-      startTrustPolling()
-    }
-
-    return current()
-  }
-
   /// User tapped Grant — open Accessibility only (never Input Monitoring).
   static func requestAccessibilityFromUI() {
-    didOfferAccessibilityThisSession = true
     let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
     _ = AXIsProcessTrustedWithOptions(opts)
     _ = IOHIDRequestAccess(kIOHIDRequestTypePostEvent)

@@ -1,11 +1,21 @@
 import 'package:flutter/material.dart';
 
 import '../../data/models.dart';
+import 'device_illustration.dart';
 
 class DeviceHeader extends StatelessWidget {
-  const DeviceHeader({super.key, required this.state});
+  const DeviceHeader({
+    super.key,
+    required this.state,
+    required this.devices,
+    required this.onDeviceSelected,
+    required this.onRescan,
+  });
 
   final DeviceState state;
+  final List<DeviceDescriptor> devices;
+  final ValueChanged<String> onDeviceSelected;
+  final VoidCallback onRescan;
 
   @override
   Widget build(BuildContext context) {
@@ -13,12 +23,10 @@ class DeviceHeader extends StatelessWidget {
     final connectionLabel = switch (state.connection) {
       ConnectionType.ble => 'Bluetooth',
       ConnectionType.bolt => 'Logi Bolt',
+      ConnectionType.usb => 'USB',
+      ConnectionType.receiver => 'USB receiver',
       ConnectionType.unknown => state.connected ? 'Connected' : 'Not connected',
     };
-
-    final title = state.connected
-        ? (state.name == 'USB Receiver' ? 'MX Master 3S' : state.name)
-        : 'No device';
 
     return Material(
       elevation: 0,
@@ -29,25 +37,74 @@ class DeviceHeader extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
           child: Row(
             children: [
-              _DeviceAvatar(connected: state.connected),
+              _DeviceAvatar(
+                connected: state.connected,
+                artworkKey: state.artworkKey,
+                modelId: state.modelId,
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (state.connected) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        connectionLabel,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            state.deviceId == null ? 'No device' : state.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                         ),
+                        if (devices.isNotEmpty)
+                          PopupMenuButton<String>(
+                            tooltip: 'Select device',
+                            icon: const Icon(Icons.expand_more, size: 20),
+                            onSelected: onDeviceSelected,
+                            itemBuilder: (context) => [
+                              for (final device in devices)
+                                PopupMenuItem(
+                                  value: device.id,
+                                  child: Row(
+                                    children: [
+                                      SizedBox(
+                                        width: 24,
+                                        height: 30,
+                                        child: Opacity(
+                                          opacity: device.connected ? 1 : 0.45,
+                                          child: DeviceIllustration(
+                                            artworkKey: device.artworkKey,
+                                            modelId: device.modelId,
+                                            compact: true,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(child: Text(device.name)),
+                                      if (device.id == state.deviceId)
+                                        const Icon(Icons.check, size: 18),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                          ),
+                      ],
+                    ),
+                    if (state.deviceId != null) ...[
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          Text(
+                            connectionLabel,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          _VerificationBadge(verified: state.verified),
+                        ],
                       ),
                     ],
                   ],
@@ -62,6 +119,11 @@ class DeviceHeader extends StatelessWidget {
                 ok: state.daemonOnline,
                 label: state.daemonOnline ? 'Daemon' : 'No daemon',
               ),
+              IconButton(
+                tooltip: 'Rescan devices',
+                onPressed: onRescan,
+                icon: const Icon(Icons.refresh, size: 19),
+              ),
             ],
           ),
         ),
@@ -71,9 +133,15 @@ class DeviceHeader extends StatelessWidget {
 }
 
 class _DeviceAvatar extends StatelessWidget {
-  const _DeviceAvatar({required this.connected});
+  const _DeviceAvatar({
+    required this.connected,
+    required this.artworkKey,
+    required this.modelId,
+  });
 
   final bool connected;
+  final String artworkKey;
+  final String modelId;
 
   @override
   Widget build(BuildContext context) {
@@ -84,27 +152,51 @@ class _DeviceAvatar extends StatelessWidget {
       height: 52,
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.65),
+        color: theme.colorScheme.surfaceContainerHighest.withValues(
+          alpha: 0.65,
+        ),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
         ),
       ),
-      child: Image.asset(
-        connected
-            ? 'assets/devices/mx_master_3s/front_core.png'
-            : 'assets/brand/logi_logo.png',
-        fit: BoxFit.contain,
-        filterQuality: FilterQuality.high,
-        errorBuilder: (_, __, ___) => Image.asset(
-          'assets/brand/logi_logo.png',
-          fit: BoxFit.contain,
-          errorBuilder: (_, __, ___) => Icon(
-            Icons.mouse,
-            color: theme.colorScheme.onPrimaryContainer,
-            size: 26,
-          ),
-        ),
+      child: connected
+          ? DeviceIllustration(
+              artworkKey: artworkKey,
+              modelId: modelId,
+              compact: true,
+            )
+          : Opacity(
+              opacity: 0.45,
+              child: DeviceIllustration(
+                artworkKey: artworkKey,
+                modelId: modelId,
+                compact: true,
+              ),
+            ),
+    );
+  }
+}
+
+class _VerificationBadge extends StatelessWidget {
+  const _VerificationBadge({required this.verified});
+
+  final bool verified;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: verified
+            ? scheme.primaryContainer
+            : scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        verified ? 'Verified' : 'Compatible—untested',
+        style: Theme.of(context).textTheme.labelSmall,
       ),
     );
   }
@@ -126,8 +218,8 @@ class _BatteryChip extends StatelessWidget {
         charging
             ? Icons.battery_charging_full
             : low
-                ? Icons.battery_alert
-                : Icons.battery_std,
+            ? Icons.battery_alert
+            : Icons.battery_std,
         size: 18,
         color: low ? theme.colorScheme.error : theme.colorScheme.primary,
       ),

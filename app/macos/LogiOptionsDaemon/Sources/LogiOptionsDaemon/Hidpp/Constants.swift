@@ -6,17 +6,22 @@ enum Hidpp {
     static let longReportId: UInt8 = 0x11
     static let directDeviceIndex: UInt8 = 0xFF
 
-    /// Bolt / Unifying style receivers.
+    /// Options+ Bolt / Unifying-style receivers. Gaming receivers are absent;
+    /// direct devices use the exact Options+ DEVIO allowlist in DeviceRegistry.
     static let receiverProductIds: Set<Int> = [
-        0xC52B, 0xC532, 0xC534, 0xC539, 0xC53A,
-        0xC545, 0xC547, 0xC548,
+        0xC52B, 0xC52F, 0xC532, 0xC534, 0xC539, 0xC53A,
+        0xC545, 0xC548,
     ]
 
     enum Feature: UInt16 {
         case root = 0x0000
         case featureSet = 0x0001
+        case deviceInfo = 0x0003
+        case deviceName = 0x0005
         case batteryStatus = 0x1000
         case unifiedBattery = 0x1004
+        case haptic = 0x19B0
+        case forceSensingButton = 0x19C0
         case reprogControlsV4 = 0x1B04
         case changeHost = 0x1814
         case smartShift = 0x2110
@@ -25,15 +30,6 @@ enum Hidpp {
         case thumbWheel = 0x2150
         case adjustableDpi = 0x2201
         case extendedAdjustableDpi = 0x2202
-    }
-
-    /// MX Master 3S control IDs (Special Keys / ReprogControls).
-    enum Control: UInt16 {
-        case middle = 0x0052
-        case back = 0x0053
-        case forward = 0x0056
-        case gesture = 0x00C3
-        case modeShift = 0x00C4
     }
 
     /// MappingFlag.DIVERTED | valid bit.

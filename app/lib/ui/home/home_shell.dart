@@ -7,6 +7,7 @@ import '../../data/daemon_client.dart';
 import '../../data/daemon_lifecycle.dart';
 import '../../data/models.dart';
 import '../../data/permissions.dart';
+import '../../data/profile_controller.dart';
 import '../apps/apps_page.dart';
 import '../buttons/buttons_page.dart';
 import '../point_scroll/point_scroll_page.dart';
@@ -25,16 +26,20 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   final _client = DaemonClient();
   final _permissions = PermissionsService();
   final _daemonLifecycle = DaemonLifecycle();
+  late final ProfileController _profiles;
   Timer? _poll;
   DeviceState _state = const DeviceState();
   String? _error;
   PermissionStatus _perms = const PermissionStatus();
+
   /// User dismissed the banner until next launch / explicit re-check fails.
   bool _permBannerDismissed = false;
+  bool _restartingIncompatibleDaemon = false;
 
   @override
   void initState() {
     super.initState();
+    _profiles = ProfileController(_client)..addListener(_profilesChanged);
     WidgetsBinding.instance.addObserver(this);
     // Native poll posts when Accessibility flips on — clear banner without
     // waiting for the next 2s status tick.
@@ -65,8 +70,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _bootstrapPermissions() async {
-    // Opens Accessibility Settings once if missing (no Input Monitoring).
-    final status = await _permissions.request();
+    // Window startup is read-only. Native startup handles the initial prompt,
+    // while the in-app Grant action is the only explicit Settings opener.
+    final status = await _permissions.getStatus();
     if (!mounted) return;
     setState(() => _perms = status);
   }
@@ -75,8 +81,22 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
+    _profiles
+      ..removeListener(_profilesChanged)
+      ..dispose();
     _client.disconnect();
     super.dispose();
+  }
+
+  void _profilesChanged() {
+    if (!mounted) return;
+    setState(() {
+      _state = _profiles.state.copyWith(
+        accessibilityTrusted: _perms.accessibility,
+        inputMonitoringTrusted: _perms.inputMonitoring,
+      );
+      _error = _profiles.error;
+    });
   }
 
   Future<void> _refresh() async {
@@ -98,13 +118,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         });
         return;
       }
-      final status = await _client.getStatus();
+      await _profiles.poll();
+      if (_profiles.error?.contains('unknown method getSnapshot') == true) {
+        await _restartIncompatibleDaemon();
+      }
       if (!mounted) return;
       setState(() {
         _perms = nativePerms;
-        // Daemon injects events — its trust flags are authoritative when online.
-        _state = status;
-        _error = null;
+        _state = _profiles.state.copyWith(
+          accessibilityTrusted: nativePerms.accessibility,
+          inputMonitoringTrusted: nativePerms.inputMonitoring,
+        );
+        _error = _profiles.error;
       });
     } catch (e) {
       if (!mounted) return;
@@ -127,75 +152,23 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _setDpi(int v) async {
-    setState(() => _state = _state.copyWith(dpi: v));
-    try {
-      await _client.setDpi(v);
-    } catch (_) {}
-  }
-
-  Future<void> _setSmartShift(bool enabled, int thr) async {
-    setState(
-      () => _state = _state.copyWith(
-        smartShiftEnabled: enabled,
-        smartShiftThreshold: thr,
-      ),
-    );
-    try {
-      await _client.setSmartShift(enabled: enabled, threshold: thr);
-    } catch (_) {}
-  }
-
-  Future<void> _setHires(bool v) async {
-    setState(() => _state = _state.copyWith(hiresWheel: v));
-    try {
-      await _client.setHiResWheel(hires: v, invert: _state.invertWheel);
-    } catch (_) {}
-  }
-
-  Future<void> _setInvertWheel(bool v) async {
-    setState(() => _state = _state.copyWith(invertWheel: v));
-    try {
-      await _client.setHiResWheel(hires: _state.hiresWheel, invert: v);
-    } catch (_) {}
-  }
-
-  Future<void> _setScrollSpeed(double v) async {
-    // Optimistic UI; daemon applies immediately (software scale).
-    setState(() => _state = _state.copyWith(scrollSpeed: v));
-    try {
-      await _client.setScrollSpeed(v);
-    } catch (e) {
-      // ignore: avoid_print
-      print('setScrollSpeed failed: $e');
+  Future<void> _restartIncompatibleDaemon() async {
+    if (_restartingIncompatibleDaemon) return;
+    _restartingIncompatibleDaemon = true;
+    _client.disconnect();
+    final restarted = await _daemonLifecycle.start(requestAccessibility: false);
+    if (restarted) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      await _profiles.poll();
     }
-  }
-
-  Future<void> _setThumbInvert(bool v) async {
-    setState(() => _state = _state.copyWith(thumbInvert: v));
-    try {
-      await _client.setThumbWheel(divert: true, invert: v);
-    } catch (e) {
-      print('setThumbInvert failed: $e');
-    }
-  }
-
-  Future<void> _setThumbSpeed(double v) async {
-    setState(() => _state = _state.copyWith(thumbSpeed: v));
-    try {
-      await _client.setThumbSpeed(v);
-    } catch (e) {
-      print('setThumbSpeed failed: $e');
-    }
+    _restartingIncompatibleDaemon = false;
   }
 
   Future<void> _setLoginAtStartup(bool v) async {
     setState(() => _state = _state.copyWith(loginAtStartup: v));
     try {
       await _client.setLoginAtStartup(v);
-    } catch (e) {
-      print('setLoginAtStartup failed: $e');
-    }
+    } catch (_) {}
     await _refresh();
   }
 
@@ -239,13 +212,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _startDaemon() async {
-    final ok = await _daemonLifecycle.start();
+    final ok = await _daemonLifecycle.start(requestAccessibility: true);
     if (!mounted) return;
     if (!ok) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not start the daemon.'),
-        ),
+        const SnackBar(content: Text('Could not start the daemon.')),
       );
     }
     // Wait for RPC bind + device connect.
@@ -259,17 +230,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _setButton(
-    ControlId control,
-    Map<String, dynamic> action,
-  ) async {
-    try {
-      await _client.setButton(cid: control.cidHex, action: action);
-    } catch (_) {}
-  }
-
   Future<void> _fixPermissions() async {
     // Accessibility only — Input Monitoring is not required.
+    try {
+      await _client.requestAccessibility();
+    } catch (_) {
+      // The UI process can still register itself and open the pane while the
+      // daemon is stopped; Start daemon will register the helper later.
+    }
     await _permissions.openAccessibility();
     final after = await _permissions.getStatus();
     if (!mounted) return;
@@ -280,21 +248,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final pages = [
-      ButtonsPage(
-        state: _state,
-        onAssign: _setButton,
+      ButtonsPage(controller: _profiles),
+      PointScrollPage(controller: _profiles),
+      AppsPage(
+        controller: _profiles,
+        onEditProfile: () => setState(() => _tab = 0),
       ),
-      PointScrollPage(
-        state: _state,
-        onDpiChanged: _setDpi,
-        onSmartShiftChanged: _setSmartShift,
-        onHiresChanged: _setHires,
-        onInvertWheel: _setInvertWheel,
-        onScrollSpeed: _setScrollSpeed,
-        onThumbInvert: _setThumbInvert,
-        onThumbSpeed: _setThumbSpeed,
-      ),
-      AppsPage(state: _state),
       SettingsPage(
         state: _state,
         onLoginAtStartup: _setLoginAtStartup,
@@ -330,7 +289,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         body: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            DeviceHeader(state: _state),
+            DeviceHeader(
+              state: _state,
+              devices: _profiles.devices,
+              onDeviceSelected: _profiles.selectDevice,
+              onRescan: _profiles.rescan,
+            ),
             if (showPermBanner)
               Material(
                 color: Theme.of(context).colorScheme.tertiaryContainer,
@@ -340,17 +304,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                     children: [
                       Icon(
                         Icons.privacy_tip_outlined,
-                        color:
-                            Theme.of(context).colorScheme.onTertiaryContainer,
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.onTertiaryContainer,
                       ),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Text(
                           _permissionMessage(),
                           style: TextStyle(
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onTertiaryContainer,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onTertiaryContainer,
                           ),
                         ),
                       ),
@@ -374,18 +339,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                   'Logi Options+ is running and will conflict.',
                 ),
                 actions: [
-                  TextButton(
-                    onPressed: _refresh,
-                    child: const Text('Retry'),
-                  ),
+                  TextButton(onPressed: _refresh, child: const Text('Retry')),
                 ],
               ),
             if (_error != null && !_state.daemonOnline)
               Material(
                 color: Theme.of(context).colorScheme.errorContainer,
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
                   child: Text(
                     _error!,
                     style: TextStyle(

@@ -104,6 +104,14 @@ Packages
 xcuserdata
 DerivedData/
 *.xcodeproj
+!app/macos/Runner.xcodeproj/
+!app/macos/Runner.xcodeproj/project.pbxproj
+!app/macos/Runner.xcodeproj/project.xcworkspace/
+!app/macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/
+!app/macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+!app/macos/Runner.xcodeproj/xcshareddata/
+!app/macos/Runner.xcodeproj/xcshareddata/xcschemes/
+!app/macos/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme
 
 
 ### Windows ###

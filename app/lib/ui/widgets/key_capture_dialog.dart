@@ -100,7 +100,8 @@ class _KeyCaptureDialogState extends State<_KeyCaptureDialog> {
     if (key == LogicalKeyboardKey.arrowUp) return 'up';
     if (key == LogicalKeyboardKey.arrowDown) return 'down';
     if (key == LogicalKeyboardKey.space) return 'space';
-    if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter) {
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
       return 'return';
     }
     if (key == LogicalKeyboardKey.tab) return 'tab';
@@ -135,7 +136,10 @@ class _KeyCaptureDialogState extends State<_KeyCaptureDialog> {
               onKeyEvent: _onKey,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 120),
-                padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
+                padding: const EdgeInsets.symmetric(
+                  vertical: 28,
+                  horizontal: 16,
+                ),
                 decoration: BoxDecoration(
                   color: theme.colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(12),
