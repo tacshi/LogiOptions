@@ -10,12 +10,14 @@ class DeviceHeader extends StatelessWidget {
     required this.devices,
     required this.onDeviceSelected,
     required this.onRescan,
+    this.detectingDevice = false,
   });
 
   final DeviceState state;
   final List<DeviceDescriptor> devices;
   final ValueChanged<String> onDeviceSelected;
   final VoidCallback onRescan;
+  final bool detectingDevice;
 
   @override
   Widget build(BuildContext context) {
@@ -51,7 +53,11 @@ class DeviceHeader extends StatelessWidget {
                       children: [
                         Flexible(
                           child: Text(
-                            state.deviceId == null ? 'No device' : state.name,
+                            detectingDevice
+                                ? 'Detecting device…'
+                                : state.deviceId == null
+                                ? 'No device'
+                                : state.name,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.titleMedium?.copyWith(
                               fontWeight: FontWeight.w600,
@@ -116,8 +122,12 @@ class DeviceHeader extends StatelessWidget {
               ),
               const SizedBox(width: 10),
               _StatusDot(
-                ok: state.daemonOnline,
-                label: state.daemonOnline ? 'Daemon' : 'No daemon',
+                ok: state.daemonOnline || detectingDevice,
+                label: detectingDevice
+                    ? 'Starting'
+                    : state.daemonOnline
+                    ? 'Daemon'
+                    : 'No daemon',
               ),
               IconButton(
                 tooltip: 'Rescan devices',

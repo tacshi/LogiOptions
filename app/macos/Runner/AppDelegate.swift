@@ -44,7 +44,31 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   func startDaemonIfNeeded() {
-    ensureDaemonRunning(force: false, requestAccessibility: false)
+    let currentVersion = DaemonInstallPolicy.versionIdentifier()
+    let defaults = UserDefaults.standard
+    let lastHandledVersion = defaults.string(
+      forKey: DaemonInstallPolicy.handledVersionKey
+    )
+    let isNewVersion = DaemonInstallPolicy.shouldTransition(
+      currentVersion: currentVersion,
+      lastHandledVersion: lastHandledVersion
+    )
+    if isNewVersion {
+      NSLog(
+        "[LogiOptions] installed version changed "
+          + "\(lastHandledVersion ?? "none") → \(currentVersion)"
+      )
+    }
+    let started = ensureDaemonRunning(
+      force: isNewVersion,
+      requestAccessibility: isNewVersion
+    )
+    if isNewVersion && started {
+      defaults.set(
+        currentVersion,
+        forKey: DaemonInstallPolicy.handledVersionKey
+      )
+    }
   }
 
   /// Start (or restart) the daemon — used after Settings → Stop.
@@ -53,19 +77,14 @@ class AppDelegate: FlutterAppDelegate {
     force: Bool = true,
     requestAccessibility: Bool = false
   ) -> Bool {
-    ensureDaemonRunning(
+    let started = ensureDaemonRunning(
       force: force,
       requestAccessibility: requestAccessibility
     )
-    // Poll until RPC socket is up (openApplication / nohup are async).
-    for _ in 0..<25 {
-      if isSocketLive() { return true }
-      Thread.sleep(forTimeInterval: 0.12)
+    if !started {
+      NSLog("[LogiOptions] startDaemon failed readiness check")
     }
-    let pids = daemonPIDs()
-    let live = isSocketLive()
-    NSLog("[LogiOptions] startDaemon done socket=\(live) pids=\(pids)")
-    return live || !pids.isEmpty
+    return started
   }
 
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -85,18 +104,18 @@ class AppDelegate: FlutterAppDelegate {
   private func ensureDaemonRunning(
     force: Bool,
     requestAccessibility: Bool
-  ) {
-    if !force && Self.didAttemptDaemonStart { return }
+  ) -> Bool {
+    if !force && Self.didAttemptDaemonStart { return true }
     Self.didAttemptDaemonStart = true
 
     guard let daemonURL = locateDaemonBinary() else {
       NSLog("[LogiOptions] LogiOptionsDaemon not found in app bundle")
-      return
+      return false
     }
 
     if !force && isSocketLive() && !daemonPIDs().isEmpty {
       NSLog("[LogiOptions] daemon already running — keep it")
-      return
+      return true
     }
 
     // Kill orphans / stale locks so a clean bind succeeds.
@@ -106,10 +125,39 @@ class AppDelegate: FlutterAppDelegate {
     }
     try? FileManager.default.removeItem(atPath: "/tmp/logioptions.sock")
     try? FileManager.default.removeItem(atPath: "/tmp/logioptions.daemon.lock")
-    launchDetached(
+    guard launchDetached(
       daemonURL,
       requestAccessibility: requestAccessibility
+    ) else {
+      return false
+    }
+    return waitForDaemonReady()
+  }
+
+  /// Require a stable RPC process before recording an installed version as
+  /// handled. A helper that binds and immediately crashes must be retried.
+  private func waitForDaemonReady() -> Bool {
+    let deadline = Date().addingTimeInterval(3)
+    var liveSince: Date?
+    while Date() < deadline {
+      let live = isSocketLive() && !daemonPIDs().isEmpty
+      if live {
+        let firstLive = liveSince ?? Date()
+        liveSince = firstLive
+        if Date().timeIntervalSince(firstLive) >= 0.6 {
+          return true
+        }
+      } else {
+        liveSince = nil
+      }
+      Thread.sleep(forTimeInterval: 0.06)
+    }
+    let pids = daemonPIDs()
+    NSLog(
+      "[LogiOptions] daemon readiness failed "
+        + "socket=\(isSocketLive()) pids=\(pids)"
     )
+    return false
   }
 
   private func stopExistingDaemons() {
@@ -177,7 +225,7 @@ class AppDelegate: FlutterAppDelegate {
   private func launchDetached(
     _ daemonURL: URL,
     requestAccessibility: Bool
-  ) {
+  ) -> Bool {
     let outPath = "/tmp/logioptions.daemon.out.log"
     let errPath = "/tmp/logioptions.daemon.err.log"
     if !FileManager.default.fileExists(atPath: outPath) {
@@ -198,7 +246,7 @@ class AppDelegate: FlutterAppDelegate {
     }
 
     NSLog("[LogiOptions] launching daemon: \(exec.path)")
-    launchNohup(
+    return launchNohup(
       exec,
       outPath: outPath,
       errPath: errPath,
@@ -211,7 +259,7 @@ class AppDelegate: FlutterAppDelegate {
     outPath: String,
     errPath: String,
     requestAccessibility: Bool
-  ) {
+  ) -> Bool {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/bash")
     let permissionArgument = requestAccessibility
@@ -226,8 +274,10 @@ class AppDelegate: FlutterAppDelegate {
     do {
       try process.run()
       process.waitUntilExit()
+      return process.terminationStatus == 0
     } catch {
       NSLog("[LogiOptions] failed to start daemon: \(error)")
+      return false
     }
   }
 

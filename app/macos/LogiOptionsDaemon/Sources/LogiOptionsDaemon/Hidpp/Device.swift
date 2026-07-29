@@ -33,6 +33,7 @@ final class HidppDevice: HidppRequesting {
     private var softwareId: UInt8 = 0x8
     private let reportPtr: UnsafeMutablePointer<UInt8>
     private let reportCapacity = 64
+    private var isOpen = false
     private var waitMatch: UInt16?
     private var waitResult: Data?
     private var lastHidpp10Error: UInt8?
@@ -70,10 +71,15 @@ final class HidppDevice: HidppRequesting {
         self.reportPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: reportCapacity)
         reportPtr.initialize(repeating: 0, count: reportCapacity)
 
-        guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
-            reportPtr.deallocate()
+        let openResult = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
+        guard openResult == kIOReturnSuccess else {
+            DaemonLog.warn(
+                "Unable to open HID++ interface \(name) "
+                    + String(format: "(0x%08x)", openResult)
+            )
             return nil
         }
+        isOpen = true
 
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         IOHIDDeviceRegisterInputReportCallback(
@@ -101,9 +107,11 @@ final class HidppDevice: HidppRequesting {
     }
 
     deinit {
-        IOHIDDeviceRegisterRemovalCallback(device, nil, nil)
-        IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-        IOHIDDeviceClose(device, 0)
+        if isOpen {
+            IOHIDDeviceRegisterRemovalCallback(device, nil, nil)
+            IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            IOHIDDeviceClose(device, 0)
+        }
         reportPtr.deallocate()
     }
 
@@ -327,6 +335,14 @@ struct HidppEndpoint: Equatable {
 }
 
 enum HidppDiscovery {
+    static func isHidppInterface(
+        primaryUsagePage: Int,
+        usagePairPages: [Int]
+    ) -> Bool {
+        primaryUsagePage >= 0xFF00
+            || usagePairPages.contains { $0 >= 0xFF00 }
+    }
+
     /// Find Logitech vendor-page HID interfaces suitable for HID++.
     static func enumerateCandidates() -> [IOHIDDevice] {
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -335,7 +351,16 @@ enum HidppDiscovery {
         guard let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else { return [] }
         return set.filter { device in
             let usagePage = (IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsagePageKey as CFString) as? NSNumber)?.intValue ?? 0
-            return usagePage >= 0xFF00
+            let usagePairs =
+                IOHIDDeviceGetProperty(device, "DeviceUsagePairs" as CFString)
+                as? [[String: Any]] ?? []
+            let usagePairPages = usagePairs.compactMap {
+                ($0["DeviceUsagePage"] as? NSNumber)?.intValue
+            }
+            return isHidppInterface(
+                primaryUsagePage: usagePage,
+                usagePairPages: usagePairPages
+            )
         }
     }
 

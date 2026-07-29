@@ -22,21 +22,16 @@ class ProfileController extends ChangeNotifier {
   bool _reachable = false;
   String? _error;
 
-  AppSnapshot? get snapshot => _snapshot;
+  AppSnapshot? get snapshot => _reachable ? _snapshot : null;
   DeviceState get state {
-    final current = _snapshot?.state ?? const DeviceState();
-    return _reachable
-        ? current
-        : current.copyWith(
-            connected: false,
-            daemonOnline: false,
-            clearBattery: true,
-          );
+    if (!_reachable) return const DeviceState();
+    return _snapshot?.state ?? const DeviceState();
   }
 
-  List<DeviceDescriptor> get devices => _snapshot?.devices ?? const [];
+  List<DeviceDescriptor> get devices =>
+      _reachable ? (_snapshot?.devices ?? const []) : const [];
   AppConfigModel get config =>
-      _snapshot?.config ??
+      snapshot?.config ??
       const AppConfigModel(revision: 0, selectedDeviceId: null, devices: {});
   String? get selectedBundleId => _selectedBundleId;
   bool get loading => _loading;
@@ -44,7 +39,7 @@ class ProfileController extends ChangeNotifier {
   String? get error => _error;
 
   DeviceConfiguration? get deviceConfiguration =>
-      _snapshot?.selectedConfiguration;
+      snapshot?.selectedConfiguration;
 
   Map<String, dynamic> get deviceSettings => {
     ...?deviceConfiguration?.settings,
@@ -81,8 +76,7 @@ class ProfileController extends ChangeNotifier {
       _reachable = true;
       _error = null;
     } catch (error) {
-      _reachable = false;
-      _error = error.toString();
+      _discardRuntimeState(error);
       rethrow;
     } finally {
       _loading = false;
@@ -98,10 +92,14 @@ class ProfileController extends ChangeNotifier {
       _error = null;
       notifyListeners();
     } catch (error) {
-      _reachable = false;
-      _error = error.toString();
+      _discardRuntimeState(error);
       notifyListeners();
     }
+  }
+
+  void markDaemonOffline({Object? error}) {
+    _discardRuntimeState(error);
+    notifyListeners();
   }
 
   void selectProfile(String? bundleId) {
@@ -131,8 +129,7 @@ class ProfileController extends ChangeNotifier {
       }
       _error = error.message;
     } catch (error) {
-      _reachable = false;
-      _error = error.toString();
+      _discardRuntimeState(error);
     } finally {
       _writing = false;
       notifyListeners();
@@ -148,8 +145,7 @@ class ProfileController extends ChangeNotifier {
       _reachable = true;
       _error = null;
     } catch (error) {
-      _reachable = false;
-      _error = error.toString();
+      _discardRuntimeState(error);
     } finally {
       _writing = false;
       notifyListeners();
@@ -267,8 +263,7 @@ class ProfileController extends ChangeNotifier {
       for (final key in pending.keys) {
         _optimisticDeviceSettings.remove(key);
       }
-      _reachable = false;
-      _error = error.toString();
+      _discardRuntimeState(error);
     } finally {
       _writing = false;
       notifyListeners();
@@ -311,9 +306,7 @@ class ProfileController extends ChangeNotifier {
       }
       _error = error.message;
     } catch (error) {
-      _optimisticProfile = null;
-      _reachable = false;
-      _error = error.toString();
+      _discardRuntimeState(error);
     } finally {
       _writing = false;
       notifyListeners();
@@ -323,6 +316,17 @@ class ProfileController extends ChangeNotifier {
   Future<void> _reloadWithoutNotification() async {
     _snapshot = await client.getSnapshot();
     _reachable = true;
+  }
+
+  void _discardRuntimeState(Object? error) {
+    _saveDebounce?.cancel();
+    _deviceSettingsDebounce?.cancel();
+    _snapshot = null;
+    _reachable = false;
+    _selectedBundleId = null;
+    _optimisticProfile = null;
+    _optimisticDeviceSettings.clear();
+    _error = error?.toString();
   }
 
   @override

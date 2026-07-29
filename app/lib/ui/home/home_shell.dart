@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../../data/daemon_client.dart';
 import '../../data/daemon_lifecycle.dart';
+import '../../data/daemon_startup.dart';
 import '../../data/models.dart';
 import '../../data/permissions.dart';
 import '../../data/profile_controller.dart';
@@ -35,22 +36,25 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// User dismissed the banner until next launch / explicit re-check fails.
   bool _permBannerDismissed = false;
   bool _restartingIncompatibleDaemon = false;
+  bool _detectingDevice = false;
 
   @override
   void initState() {
     super.initState();
     _profiles = ProfileController(_client)..addListener(_profilesChanged);
     WidgetsBinding.instance.addObserver(this);
-    // Native poll posts when Accessibility flips on — clear banner without
+    // Native poll posts when Accessibility flips on — refresh without
     // waiting for the next 2s status tick.
     _permissions.onChanged = (status) {
       if (!mounted) return;
       setState(() {
         _perms = status;
-        _state = _state.copyWith(
-          accessibilityTrusted: status.accessibility,
-          inputMonitoringTrusted: status.inputMonitoring,
-        );
+        if (!_state.daemonOnline) {
+          _state = _state.copyWith(
+            accessibilityTrusted: status.accessibility,
+            inputMonitoringTrusted: status.inputMonitoring,
+          );
+        }
       });
     };
     _bootstrapPermissions();
@@ -91,10 +95,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void _profilesChanged() {
     if (!mounted) return;
     setState(() {
-      _state = _profiles.state.copyWith(
-        accessibilityTrusted: _perms.accessibility,
-        inputMonitoringTrusted: _perms.inputMonitoring,
-      );
+      _state = _profiles.state;
       _error = _profiles.error;
     });
   }
@@ -105,15 +106,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final online = await _client.connect();
       if (!online) {
         if (!mounted) return;
+        final neutralState = _neutralState(nativePerms);
+        _profiles.markDaemonOffline(
+          error: 'Daemon offline — reopen LogiOptions.app',
+        );
         setState(() {
           _perms = nativePerms;
-          _state = _state.copyWith(
-            daemonOnline: false,
-            connected: false,
-            clearBattery: true,
-            accessibilityTrusted: nativePerms.accessibility,
-            inputMonitoringTrusted: nativePerms.inputMonitoring,
-          );
+          _state = neutralState;
           _error = 'Daemon offline — reopen LogiOptions.app';
         });
         return;
@@ -125,10 +124,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() {
         _perms = nativePerms;
-        _state = _profiles.state.copyWith(
-          accessibilityTrusted: nativePerms.accessibility,
-          inputMonitoringTrusted: nativePerms.inputMonitoring,
-        );
+        _state = _profiles.state;
         _error = _profiles.error;
       });
     } catch (e) {
@@ -136,16 +132,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final msg = e.toString();
       // Transient RPC blip — don't flash "No daemon" if we were just online.
       final soft = msg.contains('TimeoutException') || msg.contains('rpc ');
+      DeviceState? neutralState;
+      if (!(soft && _state.daemonOnline)) {
+        neutralState = _neutralState(nativePerms);
+        _profiles.markDaemonOffline(error: e);
+      }
       setState(() {
         _perms = nativePerms;
         if (soft && _state.daemonOnline) {
           _error = null;
         } else {
-          _state = _state.copyWith(
-            daemonOnline: false,
-            accessibilityTrusted: nativePerms.accessibility,
-            inputMonitoringTrusted: nativePerms.inputMonitoring,
-          );
+          _state = neutralState!;
           _error = soft ? 'Connecting to daemon…' : msg;
         }
       });
@@ -199,12 +196,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       // Socket may drop as the process exits — expected.
     }
     if (!mounted) return;
+    final stoppedState = _neutralState(_perms);
+    _profiles.markDaemonOffline();
     setState(() {
-      _state = _state.copyWith(
-        daemonOnline: false,
-        connected: false,
-        clearBattery: true,
-      );
+      _detectingDevice = false;
+      _state = stoppedState;
     });
     // Give the process a moment to exit, then refresh.
     await Future<void>.delayed(const Duration(milliseconds: 400));
@@ -212,33 +208,59 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _startDaemon() async {
+    final startingState = _neutralState(_perms);
+    _profiles.markDaemonOffline();
+    if (!mounted) return;
+    setState(() {
+      _detectingDevice = true;
+      _state = startingState;
+      _error = null;
+    });
     final ok = await _daemonLifecycle.start(requestAccessibility: true);
     if (!mounted) return;
     if (!ok) {
+      setState(() => _detectingDevice = false);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Could not start the daemon.')),
       );
-    }
-    // Wait for RPC bind + device connect.
-    await Future<void>.delayed(const Duration(milliseconds: 600));
-    await _refresh();
-    if (!mounted) return;
-    if (!_state.daemonOnline) {
-      // One more poll — first connect can be slow after cold start.
-      await Future<void>.delayed(const Duration(milliseconds: 800));
       await _refresh();
+      return;
+    }
+    try {
+      await DaemonStartupWaiter.waitForDiscovery(
+        refresh: _refresh,
+        readState: () => _state,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _detectingDevice = false);
+      }
     }
   }
 
+  DeviceState _neutralState(PermissionStatus permissions) => DeviceState(
+    loginAtStartup: _state.loginAtStartup,
+    accessibilityTrusted: permissions.accessibility,
+    inputMonitoringTrusted: permissions.inputMonitoring,
+  );
+
   Future<void> _fixPermissions() async {
-    // Accessibility only — Input Monitoring is not required.
     try {
       await _client.requestAccessibility();
     } catch (_) {
       // The UI process can still register itself and open the pane while the
       // daemon is stopped; Start daemon will register the helper later.
     }
-    await _permissions.openAccessibility();
+    await _refresh();
+    if (_state.daemonOnline && !_state.accessibilityTrusted) {
+      await _permissions.openAccessibility();
+    } else if (_state.daemonOnline && !_state.inputMonitoringTrusted) {
+      await _permissions.openInputMonitoring();
+    } else if (!_perms.accessibility) {
+      await _permissions.openAccessibility();
+    } else if (!_perms.inputMonitoring) {
+      await _permissions.openInputMonitoring();
+    }
     final after = await _permissions.getStatus();
     if (!mounted) return;
     setState(() => _perms = after);
@@ -259,14 +281,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         onLoginAtStartup: _setLoginAtStartup,
         onStopDaemon: _stopDaemon,
         onStartDaemon: _startDaemon,
+        detectingDevice: _detectingDevice,
       ),
     ];
 
-    // Accessibility only (daemon or UI process). Input Monitoring not required.
-    final missingAccessibility = _state.daemonOnline
-        ? !_state.accessibilityTrusted
-        : !_perms.accessibility;
-    final showPermBanner = !_permBannerDismissed && missingAccessibility;
+    final missingPermissions = _state.daemonOnline
+        ? !_state.accessibilityTrusted || !_state.inputMonitoringTrusted
+        : !_perms.allGranted;
+    final showPermBanner = !_permBannerDismissed && missingPermissions;
 
     // Swallow arrow / Ctrl+arrow so leaked CGEvent hotkeys cannot move the
     // bottom NavigationBar (Spaces must be handled by the daemon via System Events).
@@ -292,6 +314,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             DeviceHeader(
               state: _state,
               devices: _profiles.devices,
+              detectingDevice: _detectingDevice,
               onDeviceSelected: _profiles.selectDevice,
               onRescan: _profiles.rescan,
             ),
@@ -392,7 +415,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   String _permissionMessage() {
-    return 'Enable Accessibility for LogiOptions and LogiOptionsDaemon '
-        '(System Settings → Privacy & Security → Accessibility).';
+    if (!_state.accessibilityTrusted) {
+      return 'Enable Accessibility for LogiOptionsDaemon '
+          '(System Settings → Privacy & Security → Accessibility).';
+    }
+    return 'Enable Input Monitoring for LogiOptionsDaemon so Bluetooth '
+        'devices can be opened.';
   }
 }

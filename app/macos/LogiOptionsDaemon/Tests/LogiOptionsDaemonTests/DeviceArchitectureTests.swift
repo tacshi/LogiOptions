@@ -121,6 +121,21 @@ final class DeviceRegistryTests: XCTestCase {
         )
     }
 
+    func testBluetoothCompositeVendorUsageIsEligibleForDiscovery() {
+        XCTAssertTrue(
+            HidppDiscovery.isHidppInterface(
+                primaryUsagePage: 0x0001,
+                usagePairPages: [0x0001, 0xFF43]
+            )
+        )
+        XCTAssertFalse(
+            HidppDiscovery.isHidppInterface(
+                primaryUsagePage: 0x0001,
+                usagePairPages: [0x0001, 0x000C]
+            )
+        )
+    }
+
     func testDeviceInfoIdentityKeepsProductFamilyNibbleAndVariant() {
         let reply = Data([
             0x03,
@@ -168,12 +183,12 @@ final class DeviceServiceTests: XCTestCase {
         _ = service.rescan(preferredDeviceId: nil)
 
         XCTAssertEqual(
-            Set(service.descriptors(includingRecent: []).map(\.id)).count,
+            Set(service.descriptors.map(\.id)).count,
             6
         )
     }
 
-    func testFakeAdapterSelectsAndRetainsDisconnectedDevices() throws {
+    func testDisconnectedDevicesAreRemovedFromRuntimeState() throws {
         let endpoint = HidppEndpoint(
             interfaceKey: "fake",
             deviceIndex: 1,
@@ -187,10 +202,8 @@ final class DeviceServiceTests: XCTestCase {
 
         adapter.endpoints = []
         XCTAssertTrue(service.rescan(preferredDeviceId: "unit:one"))
-        let recent = descriptor(id: "unit:old", name: "Offline Mouse")
-        let listed = service.descriptors(includingRecent: [recent])
-        XCTAssertEqual(listed.count, 1)
-        XCTAssertFalse(try XCTUnwrap(listed.first).connected)
+        XCTAssertNil(service.selectedDescriptor)
+        XCTAssertTrue(service.descriptors.isEmpty)
     }
 
     func testMissingPreferredDeviceDoesNotSelectAnotherProduct() {
@@ -259,6 +272,7 @@ final class ConfigMigrationTests: XCTestCase {
         )
         XCTAssertEqual(object["version"] as? Int, 3)
         XCTAssertNotNil(object["devices"])
+        XCTAssertNil(object["recentDevices"])
         XCTAssertNil(object["global"])
     }
 
@@ -283,50 +297,26 @@ final class ConfigMigrationTests: XCTestCase {
     }
 
     func testUnsupportedGamingDeviceIsPrunedAndSelectionReturnsToOptionsDevice() {
-        let supported = DeviceDescriptor(
-            id: "unit:master",
-            modelId: "6b023",
-            name: "MX Master 3",
-            kind: .mouse,
-            transport: "bolt",
-            connected: true,
-            verification: .verified,
-            capabilities: .minimal,
-            controls: [],
-            artworkKey: "mx_master"
-        )
-        let gaming = DeviceDescriptor(
-            id: "unit:g502",
-            modelId: "c547",
-            name: "G502 X LIGHTSPEED",
-            kind: .mouse,
-            transport: "receiver",
-            connected: true,
-            verification: .compatible,
-            capabilities: .minimal,
-            controls: [],
-            artworkKey: "generic_mouse"
-        )
+        let supportedId = "unit:master"
+        let gamingId = "unit:g502"
         var config = AppConfig(
-            selectedDeviceId: gaming.id,
+            selectedDeviceId: gamingId,
             devices: [
-                supported.id: DeviceConfiguration(
-                    modelId: supported.modelId,
+                supportedId: DeviceConfiguration(
+                    modelId: "6b023",
                     global: .defaultGlobal
                 ),
-                gaming.id: DeviceConfiguration(
-                    modelId: gaming.modelId,
+                gamingId: DeviceConfiguration(
+                    modelId: "c547",
                     global: .defaultGlobal
                 ),
-            ],
-            recentDevices: [supported.id: supported, gaming.id: gaming]
+            ]
         )
 
         config.pruneUnsupportedDevices()
 
-        XCTAssertNil(config.devices[gaming.id])
-        XCTAssertNil(config.recentDevices[gaming.id])
-        XCTAssertEqual(config.selectedDeviceId, supported.id)
+        XCTAssertNil(config.devices[gamingId])
+        XCTAssertEqual(config.selectedDeviceId, supportedId)
     }
 
     func testStableDeviceIdentityCorrectsPreviouslyMisclassifiedModel() {
@@ -357,7 +347,84 @@ final class ConfigMigrationTests: XCTestCase {
 
         XCTAssertEqual(config.devices[id]?.modelId, "2b034")
         XCTAssertEqual(config.devices[id]?.global.dpi, 1_600)
-        XCTAssertEqual(config.recentDevices[id]?.artworkKey, "model_2b034")
+    }
+
+    func testStableDeviceIdentityRemovesLegacyDuplicateConfiguration() {
+        let id = "unit:4a2f9b29"
+        var config = AppConfig(
+            selectedDeviceId: id,
+            devices: [
+                AppConfig.legacyDeviceId: DeviceConfiguration(
+                    modelId: "2b034",
+                    global: ProfileSettings(dpi: 1_000)
+                ),
+                id: DeviceConfiguration(
+                    modelId: "2b034",
+                    global: ProfileSettings(dpi: 1_600)
+                ),
+            ]
+        )
+        let descriptor = DeviceDescriptor(
+            id: id,
+            modelId: "2b034",
+            name: "MX Master 3S",
+            kind: .mouse,
+            transport: "ble",
+            connected: true,
+            verification: .verified,
+            capabilities: .minimal,
+            controls: [],
+            artworkKey: "model_2b034"
+        )
+
+        config.ensureDevice(descriptor)
+
+        XCTAssertNil(config.devices[AppConfig.legacyDeviceId])
+        XCTAssertEqual(config.devices[id]?.global.dpi, 1_600)
+    }
+
+    func testLegacyRecentDeviceCacheIsNotEncodedAgain() throws {
+        let json = """
+        {
+          "version": 3,
+          "revision": 2,
+          "selectedDeviceId": "unit:old",
+          "devices": {},
+          "recentDevices": {
+            "unit:old": {
+              "id": "unit:old",
+              "modelId": "2b034",
+              "name": "MX Master 3S",
+              "kind": "mouse",
+              "transport": "bolt",
+              "connected": false,
+              "verification": "verified",
+              "capabilities": {
+                "battery": true,
+                "dpi": null,
+                "hiResWheel": true,
+                "smartShift": true,
+                "thumbWheel": true,
+                "haptics": false,
+                "forceSensing": false
+              },
+              "controls": [],
+              "artworkKey": "model_2b034"
+            }
+          }
+        }
+        """
+
+        let config = try JSONDecoder().decode(
+            AppConfig.self,
+            from: Data(json.utf8)
+        )
+        let encoded = try JSONEncoder().encode(config)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+
+        XCTAssertNil(object["recentDevices"])
     }
 }
 

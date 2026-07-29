@@ -58,7 +58,6 @@ class MainFlutterWindow: NSWindow {
         Permissions.requestAccessibilityFromUI()
         result(true)
       case "openInputMonitoring":
-        // Not required; keep method for older UI builds.
         Permissions.openSystemSettings(pane: .inputMonitoring)
         result(true)
       default:

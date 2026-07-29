@@ -6,20 +6,17 @@ import IOKit.hid
 /// Privacy permissions for remaps / scroll injection.
 ///
 /// **Accessibility** is required (CGEvent post, System Events for Spaces).
-/// **Input Monitoring is not required** for our architecture: we open our own
-/// Logitech HID++ device via IOHID and inject events — we do not listen to
-/// global key/mouse taps from other apps.
+/// **Input Monitoring** is required by macOS for the daemon to open direct
+/// Bluetooth HID interfaces.
 ///
 /// Startup only reads trust. The explicit in-app Grant action opens System
 /// Settings, then polling clears the banner after the user grants access.
 enum Permissions {
   struct Status {
     var accessibility: Bool
-    /// Kept for API compatibility; always reported, never required.
     var inputMonitoring: Bool
 
-    /// Only Accessibility gates remaps.
-    var allGranted: Bool { accessibility }
+    var allGranted: Bool { accessibility && inputMonitoring }
   }
 
   enum Pane {
@@ -36,7 +33,8 @@ enum Permissions {
     )
   }
 
-  /// User tapped Grant — open Accessibility only (never Input Monitoring).
+  /// Registers the UI process for Accessibility. The daemon registers itself
+  /// for both required permissions through its own RPC/startup flow.
   static func requestAccessibilityFromUI() {
     let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
     _ = AXIsProcessTrustedWithOptions(opts)
@@ -54,7 +52,6 @@ enum Permissions {
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
       ]
     case .inputMonitoring:
-      // Optional; not required for LogiOptions.
       anchors = [
         "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ListenEvent",
         "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
@@ -68,7 +65,7 @@ enum Permissions {
     }
   }
 
-  /// Poll until Accessibility is granted, then notify UI (banner can hide).
+  /// Poll until Accessibility is granted, then notify UI.
   private static func startTrustPolling() {
     stopTrustPolling()
     guard !accessibilityGranted() else { return }

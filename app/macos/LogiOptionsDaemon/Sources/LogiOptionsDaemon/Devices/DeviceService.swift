@@ -89,16 +89,8 @@ final class DeviceService {
         selectedEndpoint?.descriptor
     }
 
-    func descriptors(includingRecent recent: [DeviceDescriptor]) -> [DeviceDescriptor] {
-        var result = endpoints.map(\.descriptor)
-        for var prior in recent where !result.contains(where: { $0.id == prior.id }) {
-            prior.connected = false
-            result.append(prior)
-        }
-        return result.sorted {
-            if $0.connected != $1.connected { return $0.connected && !$1.connected }
-            return $0.name < $1.name
-        }
+    var descriptors: [DeviceDescriptor] {
+        endpoints.map(\.descriptor).sorted { $0.name < $1.name }
     }
 }
 

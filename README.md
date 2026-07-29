@@ -70,8 +70,10 @@ power saving, and force threshold. The Haptic Sense control can use the same
 action catalogue as every other programmable control.
 
 Finder Back and Forward assignments use Finder history shortcuts, while other
-applications retain auxiliary mouse navigation. Opening the app checks existing
-Accessibility trust without repeatedly reopening System Settings.
+applications retain auxiliary mouse navigation. Opening a newly installed app
+version restarts its embedded daemon once and requests Accessibility
+registration for that helper. Already trusted helpers remain silent, and
+reopening the same app version does not restart the daemon.
 
 The daemon checks Accessibility trust whenever it starts and reports a missing
 grant again if permission was removed. It does not repeatedly open System
@@ -94,14 +96,14 @@ export DEVELOPER_ID_APPLICATION="Developer ID Application: Your Name (TEAMID)"
 open dist/LogiOptions.app
 ```
 
-Grant Accessibility to `LogiOptions` and `LogiOptionsDaemon` in System Settings
-→ Privacy & Security → Accessibility. Input Monitoring is not required for
-normal use.
+Grant Accessibility and Input Monitoring to `LogiOptionsDaemon` in System
+Settings → Privacy & Security. Input Monitoring is required for direct Bluetooth
+devices.
 
-Building a new app does not replace an already running daemon. When testing an
-upgrade, verify the process path first and transition once to the daemon
-embedded in the new app; avoid repeatedly toggling an older daemon that predates
-the hardware-safety allowlist.
+Opening an app with a new bundle version replaces an already running daemon once
+with the helper embedded in that version. Rebuilding without changing the bundle
+version keeps the current daemon; use the explicit Stop/Start controls when
+testing same-version development builds.
 
 | Runtime data | Location |
 |---|---|
