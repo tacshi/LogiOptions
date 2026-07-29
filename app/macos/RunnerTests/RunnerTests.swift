@@ -4,9 +4,31 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
-  func testExample() {
-    // If you add code to the Runner application, consider adding tests here.
-    // See https://developer.apple.com/documentation/xctest for more information about using XCTest.
+  func testFirstInstalledVersionTransitionsDaemon() {
+    XCTAssertTrue(
+      DaemonInstallPolicy.shouldTransition(
+        currentVersion: "0.2.3+1",
+        lastHandledVersion: nil
+      )
+    )
+  }
+
+  func testNewInstalledVersionTransitionsDaemon() {
+    XCTAssertTrue(
+      DaemonInstallPolicy.shouldTransition(
+        currentVersion: "0.2.3+1",
+        lastHandledVersion: "0.2.2+1"
+      )
+    )
+  }
+
+  func testReopeningSameVersionKeepsDaemonRunning() {
+    XCTAssertFalse(
+      DaemonInstallPolicy.shouldTransition(
+        currentVersion: "0.2.3+1",
+        lastHandledVersion: "0.2.3+1"
+      )
+    )
   }
 
 }

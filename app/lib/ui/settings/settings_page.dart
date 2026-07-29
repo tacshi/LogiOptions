@@ -11,12 +11,14 @@ class SettingsPage extends StatelessWidget {
     required this.onLoginAtStartup,
     required this.onStopDaemon,
     required this.onStartDaemon,
+    this.detectingDevice = false,
   });
 
   final DeviceState state;
   final ValueChanged<bool> onLoginAtStartup;
   final VoidCallback onStopDaemon;
   final VoidCallback onStartDaemon;
+  final bool detectingDevice;
 
   @override
   Widget build(BuildContext context) {
@@ -28,9 +30,15 @@ class SettingsPage extends StatelessWidget {
         Text('Daemon', style: theme.textTheme.titleLarge),
         const SizedBox(height: 8),
         Text(
-          online ? 'Running' : 'Stopped',
+          detectingDevice
+              ? 'Starting · detecting device…'
+              : online
+              ? 'Running'
+              : 'Stopped',
           style: theme.textTheme.bodyMedium?.copyWith(
-            color: online ? theme.colorScheme.primary : theme.colorScheme.error,
+            color: online || detectingDevice
+                ? theme.colorScheme.primary
+                : theme.colorScheme.error,
             fontWeight: FontWeight.w600,
           ),
         ),
@@ -56,7 +64,7 @@ class SettingsPage extends StatelessWidget {
                 ),
                 title: const Text('Start daemon'),
                 trailing: FilledButton(
-                  onPressed: online ? null : onStartDaemon,
+                  onPressed: online || detectingDevice ? null : onStartDaemon,
                   child: const Text('Start'),
                 ),
               ),
@@ -71,7 +79,7 @@ class SettingsPage extends StatelessWidget {
                 ),
                 title: const Text('Stop daemon'),
                 trailing: FilledButton.tonal(
-                  onPressed: online ? onStopDaemon : null,
+                  onPressed: online && !detectingDevice ? onStopDaemon : null,
                   style: FilledButton.styleFrom(
                     foregroundColor: theme.colorScheme.error,
                   ),
@@ -92,8 +100,11 @@ class SettingsPage extends StatelessWidget {
                 dense: true,
                 title: const Text('Selected device'),
                 subtitle: Text(
-                  '${state.name}\n'
-                  'Model ${state.modelId} · ${_transportLabel(state.connection)}',
+                  detectingDevice
+                      ? 'Detecting device…\n'
+                            'Scanning Bluetooth and USB HID interfaces'
+                      : '${state.name}\n'
+                            'Model ${state.modelId} · ${_transportLabel(state.connection)}',
                 ),
                 isThreeLine: true,
               ),
@@ -101,14 +112,20 @@ class SettingsPage extends StatelessWidget {
               ListTile(
                 dense: true,
                 title: const Text('Runtime features'),
-                subtitle: Text(_capabilitySummary(state.capabilities)),
+                subtitle: Text(
+                  detectingDevice
+                      ? 'Waiting for device capabilities'
+                      : _capabilitySummary(state.capabilities),
+                ),
               ),
               const Divider(height: 1),
               ListTile(
                 dense: true,
                 title: const Text('Programmable controls'),
                 subtitle: Text(
-                  state.controls.isEmpty
+                  detectingDevice
+                      ? 'Waiting for device controls'
+                      : state.controls.isEmpty
                       ? 'None reported'
                       : state.controls
                             .map(
@@ -118,14 +135,18 @@ class SettingsPage extends StatelessWidget {
                             .join(', '),
                 ),
                 trailing: TextButton.icon(
-                  onPressed: () {
-                    Clipboard.setData(
-                      ClipboardData(text: _diagnosticsText(state)),
-                    );
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Diagnostics copied.')),
-                    );
-                  },
+                  onPressed: detectingDevice
+                      ? null
+                      : () {
+                          Clipboard.setData(
+                            ClipboardData(text: _diagnosticsText(state)),
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Diagnostics copied.'),
+                            ),
+                          );
+                        },
                   icon: const Icon(Icons.copy, size: 17),
                   label: const Text('Copy'),
                 ),

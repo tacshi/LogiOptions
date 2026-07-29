@@ -4,6 +4,7 @@ import 'package:logi_options/data/daemon_client.dart';
 import 'package:logi_options/data/models.dart';
 import 'package:logi_options/data/profile_controller.dart';
 import 'package:logi_options/ui/point_scroll/point_scroll_page.dart';
+import 'package:logi_options/ui/widgets/device_header.dart';
 import 'package:logi_options/ui/widgets/device_illustration.dart';
 
 void main() {
@@ -75,10 +76,33 @@ void main() {
         'keys': ['cmd', 'z'],
       });
     });
+
+    test('does not expose a disconnected configuration as live state', () {
+      const snapshot = AppSnapshot(
+        state: DeviceState(connected: false),
+        devices: [],
+        config: AppConfigModel(
+          revision: 1,
+          selectedDeviceId: 'unit:old',
+          devices: {
+            'unit:old': DeviceConfiguration(
+              modelId: '2b034',
+              global: ProfileSettings(dpi: 1600),
+              apps: {},
+              applicationMetadata: {},
+              settings: {},
+            ),
+          },
+        ),
+        frontBundleId: null,
+      );
+
+      expect(snapshot.selectedConfiguration, isNull);
+    });
   });
 
   group('profile controller', () {
-    test('marks a cached device offline when daemon polling fails', () async {
+    test('clears cached device data when daemon polling fails', () async {
       final client = _FakeDaemonClient(_snapshot());
       final controller = ProfileController(client);
       addTearDown(controller.dispose);
@@ -91,7 +115,15 @@ void main() {
       await controller.poll();
       expect(controller.state.daemonOnline, isFalse);
       expect(controller.state.connected, isFalse);
+      expect(controller.state.name, 'No device');
+      expect(controller.state.deviceId, isNull);
+      expect(controller.state.modelId, 'unknown');
+      expect(controller.state.connection, ConnectionType.unknown);
       expect(controller.state.batteryPercent, isNull);
+      expect(controller.state.capabilities, const DeviceCapabilities());
+      expect(controller.state.controls, isEmpty);
+      expect(controller.devices, isEmpty);
+      expect(controller.deviceConfiguration, isNull);
     });
 
     test(
@@ -185,6 +217,23 @@ void main() {
       (image.image as AssetImage).assetName,
       'assets/devices/catalog/2b034_ext1.png',
     );
+  });
+
+  testWidgets('shows device discovery while the daemon starts', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: DeviceHeader(
+          state: const DeviceState(daemonOnline: true),
+          devices: const [],
+          detectingDevice: true,
+          onDeviceSelected: (_) {},
+          onRescan: () {},
+        ),
+      ),
+    );
+
+    expect(find.text('Detecting device…'), findsOneWidget);
+    expect(find.text('No device'), findsNothing);
   });
 }
 

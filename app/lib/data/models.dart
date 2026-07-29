@@ -243,8 +243,8 @@ class DeviceState {
   final bool accessibilityTrusted;
   final bool inputMonitoringTrusted;
 
-  /// Accessibility is enough for remaps / host scroll / Spaces.
-  bool get permissionsOk => accessibilityTrusted;
+  /// Direct Bluetooth HID access requires both macOS privacy grants.
+  bool get permissionsOk => accessibilityTrusted && inputMonitoringTrusted;
 
   DeviceState copyWith({
     bool? connected,
@@ -580,7 +580,7 @@ class AppSnapshot {
   final String? frontBundleId;
 
   DeviceConfiguration? get selectedConfiguration {
-    final id = state.deviceId ?? config.selectedDeviceId;
+    final id = state.connected ? state.deviceId : null;
     return id == null ? null : config.devices[id];
   }
 }

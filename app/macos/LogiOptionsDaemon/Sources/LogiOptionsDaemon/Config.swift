@@ -43,7 +43,6 @@ struct AppConfig: Codable, Equatable {
     var revision: Int
     var selectedDeviceId: String?
     var devices: [String: DeviceConfiguration]
-    var recentDevices: [String: DeviceDescriptor]
 
     static let `default` = AppConfig(
         version: 3,
@@ -54,8 +53,7 @@ struct AppConfig: Codable, Equatable {
                 modelId: "2b034",
                 global: .defaultGlobal
             ),
-        ],
-        recentDevices: [:]
+        ]
     )
 
     private enum CodingKeys: String, CodingKey {
@@ -67,14 +65,12 @@ struct AppConfig: Codable, Equatable {
         version: Int = 3,
         revision: Int = 0,
         selectedDeviceId: String? = nil,
-        devices: [String: DeviceConfiguration] = [:],
-        recentDevices: [String: DeviceDescriptor] = [:]
+        devices: [String: DeviceConfiguration] = [:]
     ) {
         self.version = version
         self.revision = revision
         self.selectedDeviceId = selectedDeviceId
         self.devices = devices
-        self.recentDevices = recentDevices
     }
 
     init(from decoder: Decoder) throws {
@@ -87,10 +83,6 @@ struct AppConfig: Codable, Equatable {
             devices = try container.decodeIfPresent(
                 [String: DeviceConfiguration].self,
                 forKey: .devices
-            ) ?? [:]
-            recentDevices = try container.decodeIfPresent(
-                [String: DeviceDescriptor].self,
-                forKey: .recentDevices
             ) ?? [:]
             if selectedDeviceId == nil {
                 selectedDeviceId = devices.keys.sorted().first
@@ -116,7 +108,6 @@ struct AppConfig: Codable, Equatable {
                 apps: oldApps
             ),
         ]
-        recentDevices = [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -125,7 +116,6 @@ struct AppConfig: Codable, Equatable {
         try container.encode(revision, forKey: .revision)
         try container.encodeIfPresent(selectedDeviceId, forKey: .selectedDeviceId)
         try container.encode(devices, forKey: .devices)
-        try container.encode(recentDevices, forKey: .recentDevices)
     }
 
     var global: ProfileSettings {
@@ -186,7 +176,10 @@ struct AppConfig: Codable, Equatable {
             }
             devices[descriptor.id] = existing
         }
-        recentDevices[descriptor.id] = descriptor
+        if descriptor.id != Self.legacyDeviceId,
+           descriptor.modelId.lowercased().contains("b034") {
+            devices.removeValue(forKey: Self.legacyDeviceId)
+        }
         if selectedDeviceId == nil || selectedDeviceId == Self.legacyDeviceId {
             selectedDeviceId = descriptor.id
         }
@@ -203,14 +196,9 @@ struct AppConfig: Codable, Equatable {
         guard !unsupportedIds.isEmpty else { return }
         for id in unsupportedIds {
             devices.removeValue(forKey: id)
-            recentDevices.removeValue(forKey: id)
         }
         if let selectedDeviceId, unsupportedIds.contains(selectedDeviceId) {
-            self.selectedDeviceId = recentDevices.values
-                .filter { DeviceRegistry.supports(modelId: $0.modelId) }
-                .sorted { $0.name < $1.name }
-                .first?
-                .id
+            self.selectedDeviceId = devices.keys.sorted().first
         }
     }
 }
@@ -537,6 +525,8 @@ enum ConfigStore {
             save(cfg)
             return cfg
         }
+        // Re-encode successful loads so removed cache fields do not survive on disk.
+        save(cfg)
         return cfg
     }
 

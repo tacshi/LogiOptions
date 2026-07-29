@@ -9,11 +9,10 @@ class PermissionStatus {
   final bool accessibility;
   final bool inputMonitoring;
 
-  /// Only Accessibility is required for remaps / scroll injection.
-  bool get allGranted => accessibility;
+  bool get allGranted => accessibility && inputMonitoring;
 }
 
-/// Native channel for macOS Accessibility (Input Monitoring not required).
+/// Native channel for the macOS permissions required by the daemon.
 class PermissionsService {
   static const _channel = MethodChannel('com.logioptions/permissions');
 

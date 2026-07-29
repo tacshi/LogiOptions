@@ -532,6 +532,7 @@ final class Daemon {
                 return [
                     "ok": true,
                     "accessibilityTrusted": Permissions.accessibilityTrusted(),
+                    "inputMonitoringTrusted": Permissions.inputMonitoringTrusted(),
                 ]
             }
         case "putProfile":
@@ -696,7 +697,6 @@ final class Daemon {
     private func buildStatusDict(includeLiveSensors: Bool) -> [String: Any] {
         let connected = device != nil
         let descriptor = deviceService.selectedDescriptor
-            ?? config.selectedDeviceId.flatMap { config.recentDevices[$0] }
         let transport = descriptor?.transport ?? "unknown"
         var d: [String: Any] = [
             "ok": true,
@@ -773,12 +773,10 @@ final class Daemon {
     }
 
     private func devicesDict() -> [String: Any] {
-        let recent = Array(config.recentDevices.values)
-        let descriptors = deviceService.descriptors(includingRecent: recent)
         return [
             "ok": true,
-            "devices": JsonUtil.object(descriptors) ?? [],
-            "selectedDeviceId": config.selectedDeviceId as Any,
+            "devices": JsonUtil.object(deviceService.descriptors) ?? [],
+            "selectedDeviceId": deviceService.selectedDescriptor?.id as Any,
             "revision": config.revision,
         ]
     }
@@ -787,7 +785,7 @@ final class Daemon {
         var result = statusDictFast()
         let deviceResult = devicesDict()
         result["devices"] = deviceResult["devices"]
-        result["selectedDeviceId"] = config.selectedDeviceId as Any
+        result["selectedDeviceId"] = deviceResult["selectedDeviceId"]
         result["revision"] = config.revision
         result["config"] = JsonUtil.object(config)
         return result
@@ -870,7 +868,9 @@ final class Daemon {
               let patch = params?["settings"] as? [String: Any] else {
             return rpcError("invalid_settings", "Device settings are invalid.")
         }
-        let descriptor = config.recentDevices[deviceId]
+        let descriptor = deviceService.endpoints.first {
+            $0.descriptor.id == deviceId
+        }?.descriptor
         let patchesHaptics = patch["hapticEnabled"] != nil
             || patch["hapticLevel"] != nil
             || patch["hapticPowerSave"] != nil
