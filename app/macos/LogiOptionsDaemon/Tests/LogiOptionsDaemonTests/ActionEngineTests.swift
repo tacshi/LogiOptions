@@ -22,11 +22,43 @@ final class ActionEngineTests: XCTestCase {
         )
     }
 
+    func testBrowsersUseHistoryShortcut() {
+        for bundleId in ["com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox",
+                         "com.microsoft.edgemac", "company.thebrowser.Browser"] {
+            XCTAssertEqual(
+                ActionEngine.navigationAction(
+                    for: "back",
+                    frontmostBundleIdentifier: bundleId
+                ),
+                .keystroke(["cmd", "["]),
+                "back in \(bundleId)"
+            )
+            XCTAssertEqual(
+                ActionEngine.navigationAction(
+                    for: "forward",
+                    frontmostBundleIdentifier: bundleId
+                ),
+                .keystroke(["cmd", "]"]),
+                "forward in \(bundleId)"
+            )
+        }
+    }
+
+    func testBrowserNavigationIsMomentaryRatherThanHeldMouseState() {
+        XCTAssertEqual(
+            ActionEngine.mousePress(
+                for: "back",
+                frontmostBundleIdentifier: "com.google.Chrome"
+            ),
+            .momentaryKeystroke(["cmd", "["])
+        )
+    }
+
     func testOtherAppsKeepAuxiliaryMouseNavigation() {
         XCTAssertEqual(
             ActionEngine.navigationAction(
                 for: "back",
-                frontmostBundleIdentifier: "com.apple.Safari"
+                frontmostBundleIdentifier: "com.apple.dt.Xcode"
             ),
             .auxiliaryMouseButton(3)
         )

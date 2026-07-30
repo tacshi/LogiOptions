@@ -122,12 +122,61 @@ final class ActionEngine {
         }
     }
 
+    /// Apps that ignore auxiliary mouse buttons 3/4 and navigate history with
+    /// the standard Cmd+[ / Cmd+] shortcut instead. Safari and WebKit-derived
+    /// browsers never map the aux buttons; Chromium and Gecko browsers only do
+    /// so unreliably, so every browser is driven by the shortcut for
+    /// consistency.
+    static let historyShortcutBundleIdentifiers: Set<String> = [
+        "com.apple.finder",
+        // WebKit
+        "com.apple.safari",
+        "com.apple.safaritechnologypreview",
+        "org.epichrome.app",
+        "company.thebrowser.browser",       // Arc
+        "company.thebrowser.dia",           // Dia
+        "com.sigmaos.sigmaos.macos",
+        "com.pushplaylabs.sidekick",
+        "com.orionbrowser.orion",
+        // Chromium
+        "com.google.chrome",
+        "com.google.chrome.beta",
+        "com.google.chrome.dev",
+        "com.google.chrome.canary",
+        "com.microsoft.edgemac",
+        "com.microsoft.edgemac.beta",
+        "com.microsoft.edgemac.dev",
+        "com.brave.browser",
+        "com.brave.browser.beta",
+        "com.brave.browser.nightly",
+        "com.vivaldi.vivaldi",
+        "com.operasoftware.opera",
+        "com.operasoftware.operagx",
+        "com.operasoftware.operadeveloper",
+        "ru.yandex.desktop.yandex-browser",
+        "com.chromium.chromium",
+        "org.chromium.chromium",
+        // Gecko
+        "org.mozilla.firefox",
+        "org.mozilla.firefoxdeveloperedition",
+        "org.mozilla.nightly",
+        "app.zen-browser.zen",
+        "net.waterfox.waterfox",
+        "org.mozilla.librewolf",
+        "io.github.zen_browser.zen",
+    ]
+
+    static func usesHistoryShortcut(_ bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier = bundleIdentifier?.lowercased() else { return false }
+        return historyShortcutBundleIdentifiers.contains(bundleIdentifier)
+    }
+
     static func navigationAction(
         for name: String,
         frontmostBundleIdentifier: String?
     ) -> NavigationAction? {
         let normalizedName = name.lowercased()
-        if frontmostBundleIdentifier?.lowercased() == "com.apple.finder" {
+        if usesHistoryShortcut(frontmostBundleIdentifier) {
             switch normalizedName {
             case "back":
                 return .keystroke(["cmd", "["])
@@ -193,6 +242,10 @@ final class ActionEngine {
             mouseButton: .center
         ) else { return }
         event.setIntegerValueField(.mouseEventButtonNumber, value: buttonNumber)
+        // AppKit synthesises NSEvent.clickCount from these fields; without them
+        // apps that do honour aux buttons see a click count of 0 and drop it.
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        event.setDoubleValueField(.mouseEventPressure, value: down ? 1 : 0)
         event.post(tap: .cghidEventTap)
     }
 
