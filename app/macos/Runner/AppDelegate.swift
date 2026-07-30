@@ -1,6 +1,7 @@
 import Cocoa
 import FlutterMacOS
 import Darwin
+import Darwin.libproc
 
 @main
 class AppDelegate: FlutterAppDelegate {
@@ -108,15 +109,31 @@ class AppDelegate: FlutterAppDelegate {
     if !force && Self.didAttemptDaemonStart { return true }
     Self.didAttemptDaemonStart = true
 
-    guard let daemonURL = locateDaemonBinary() else {
+    guard let daemonURL = locateDaemonBinary(),
+          let expected = resolvedDaemonExecutable(daemonURL) else {
       NSLog("[LogiOptions] LogiOptionsDaemon not found in app bundle")
       return false
     }
 
-    if !force && isSocketLive() && !daemonPIDs().isEmpty {
+    // A daemon from a *different* install (e.g. /Applications while running a
+    // dev build) answers the same socket, so liveness alone is not proof that
+    // our code is the code being run. Adopt only our own binary.
+    let foreign = foreignDaemons()
+    if !foreign.isEmpty {
+      NSLog(
+        "[LogiOptions] foreign daemon(s) detected — taking over: "
+          + foreign.map { "\($0.pid):\($0.path)" }.joined(separator: ", ")
+      )
+    }
+
+    if !force && foreign.isEmpty && isSocketLive() && !daemonPIDs().isEmpty {
       NSLog("[LogiOptions] daemon already running — keep it")
       return true
     }
+
+    // Repoint the LaunchAgent first: with KeepAlive it would otherwise respawn
+    // the old binary the instant we kill it.
+    let agentOwnsDaemon = reconcileLoginAgent(expected: expected)
 
     // Kill orphans / stale locks so a clean bind succeeds.
     if !daemonPIDs().isEmpty {
@@ -125,6 +142,14 @@ class AppDelegate: FlutterAppDelegate {
     }
     try? FileManager.default.removeItem(atPath: "/tmp/logioptions.sock")
     try? FileManager.default.removeItem(atPath: "/tmp/logioptions.daemon.lock")
+
+    if agentOwnsDaemon {
+      // launchd starts it from the plist we just rewrote; a nohup launch here
+      // would race that and leave two daemons fighting over the socket.
+      if bootstrapLoginAgent() && waitForDaemonReady() { return true }
+      NSLog("[LogiOptions] LaunchAgent start failed — falling back to nohup")
+    }
+
     guard launchDetached(
       daemonURL,
       requestAccessibility: requestAccessibility
@@ -132,6 +157,134 @@ class AppDelegate: FlutterAppDelegate {
       return false
     }
     return waitForDaemonReady()
+  }
+
+  // MARK: - Daemon identity
+
+  /// The binary this bundle would run — same preference as `launchDetached`.
+  private func resolvedDaemonExecutable(_ daemonURL: URL) -> URL? {
+    let appBinary = daemonURL
+      .deletingLastPathComponent()
+      .appendingPathComponent("LogiOptionsDaemon.app/Contents/MacOS/LogiOptionsDaemon")
+    if FileManager.default.isExecutableFile(atPath: appBinary.path) {
+      return appBinary.resolvingSymlinksInPath()
+    }
+    return daemonURL.resolvingSymlinksInPath()
+  }
+
+  /// Running daemons whose executable is not inside this app bundle.
+  private func foreignDaemons() -> [(pid: pid_t, path: String)] {
+    let ours = Bundle.main.bundleURL.resolvingSymlinksInPath().path + "/"
+    return runningDaemons().filter { !$0.path.hasPrefix(ours) }
+  }
+
+  private func runningDaemons() -> [(pid: pid_t, path: String)] {
+    daemonPIDs().map { pid in
+      (pid, executablePath(of: pid) ?? "")
+    }
+  }
+
+  private func executablePath(of pid: pid_t) -> String? {
+    // PROC_PIDPATHINFO_MAXSIZE (4 * MAXPATHLEN) is a C macro Swift can't import.
+    var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    let n = proc_pidpath(pid, &buf, UInt32(buf.count))
+    guard n > 0 else { return nil }
+    return URL(fileURLWithPath: String(cString: buf))
+      .resolvingSymlinksInPath().path
+  }
+
+  // MARK: - LaunchAgent
+
+  private var loginAgentLabel: String { "com.logioptions.daemon" }
+
+  private var loginAgentPlistURL: URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/LaunchAgents/\(loginAgentLabel).plist")
+  }
+
+  /// If a LaunchAgent exists, make sure it points at *this* bundle's daemon.
+  /// Returns true when launchd owns daemon startup (so we must not nohup).
+  private func reconcileLoginAgent(expected: URL) -> Bool {
+    let path = loginAgentPlistURL.path
+    guard FileManager.default.fileExists(atPath: path) else { return false }
+
+    let current = loginAgentProgramPath()
+    if current == expected.path {
+      _ = runLaunchctl(["bootout", "gui/\(getuid())/\(loginAgentLabel)"])
+      return true
+    }
+
+    NSLog(
+      "[LogiOptions] LaunchAgent repointed \(current ?? "none") → \(expected.path)"
+    )
+    _ = runLaunchctl(["bootout", "gui/\(getuid())/\(loginAgentLabel)"])
+    _ = runLaunchctl(["unload", path])
+    guard writeLoginAgentPlist(executable: expected.path) else { return false }
+    return true
+  }
+
+  private func loginAgentProgramPath() -> String? {
+    guard let data = try? Data(contentsOf: loginAgentPlistURL),
+          let plist = try? PropertyListSerialization.propertyList(
+            from: data, options: [], format: nil
+          ) as? [String: Any],
+          let args = plist["ProgramArguments"] as? [String],
+          let first = args.first
+    else { return nil }
+    return URL(fileURLWithPath: first).resolvingSymlinksInPath().path
+  }
+
+  private func writeLoginAgentPlist(executable: String) -> Bool {
+    let plist: [String: Any] = [
+      "Label": loginAgentLabel,
+      "ProgramArguments": [executable],
+      "RunAtLoad": true,
+      "KeepAlive": true,
+      "ThrottleInterval": 5,
+      "ProcessType": "Interactive",
+      "StandardOutPath": "/tmp/logioptions.daemon.out.log",
+      "StandardErrorPath": "/tmp/logioptions.daemon.err.log",
+    ]
+    do {
+      try FileManager.default.createDirectory(
+        at: loginAgentPlistURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+      )
+      let data = try PropertyListSerialization.data(
+        fromPropertyList: plist, format: .xml, options: 0
+      )
+      try data.write(to: loginAgentPlistURL, options: .atomic)
+      return true
+    } catch {
+      NSLog("[LogiOptions] LaunchAgent write failed: \(error)")
+      return false
+    }
+  }
+
+  private func bootstrapLoginAgent() -> Bool {
+    let domain = "gui/\(getuid())"
+    var status = runLaunchctl(["bootstrap", domain, loginAgentPlistURL.path])
+    if status != 0 {
+      status = runLaunchctl(["load", "-w", loginAgentPlistURL.path])
+    }
+    _ = runLaunchctl(["enable", "\(domain)/\(loginAgentLabel)"])
+    return status == 0
+  }
+
+  @discardableResult
+  private func runLaunchctl(_ args: [String]) -> Int32 {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    task.arguments = args
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    do {
+      try task.run()
+      task.waitUntilExit()
+      return task.terminationStatus
+    } catch {
+      return -1
+    }
   }
 
   /// Require a stable RPC process before recording an installed version as
