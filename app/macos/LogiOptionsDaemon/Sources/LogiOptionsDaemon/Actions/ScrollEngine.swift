@@ -1,15 +1,36 @@
 import CoreGraphics
 import Foundation
 
+/// Counts per detent as an exact ratio: `counts` device counts span `detents`
+/// physical detents. A ratio (not a scalar) because the thumb wheel's diverted
+/// counts do not divide evenly into its detents — MX Master 3S reports 120
+/// counts over 18 detents per revolution. Integer math keeps a long scroll
+/// drift-free; a Double threshold silently drops a detent per revolution.
+struct DetentRatio: Equatable, ExpressibleByIntegerLiteral {
+    let counts: Int
+    let detents: Int
+
+    init(counts: Int, detents: Int = 1) {
+        self.counts = max(counts, 1)
+        self.detents = max(detents, 1)
+    }
+
+    init(integerLiteral value: Int) {
+        self.init(counts: value)
+    }
+}
+
 struct WheelDetentAccumulator {
     private static let inactivityResetInterval: TimeInterval = 0.15
 
+    /// Leftover counts, scaled by `ratio.detents` so the division stays exact.
     private var remainder = 0
+    private var lastRatio: DetentRatio?
     private var lastEventTime: TimeInterval?
 
     mutating func consume(
         delta: Int16,
-        countsPerDetent: Int,
+        countsPerDetent ratio: DetentRatio,
         at eventTime: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) -> Int {
         guard delta != 0 else { return 0 }
@@ -19,8 +40,13 @@ struct WheelDetentAccumulator {
             || eventTime - lastEventTime >= Self.inactivityResetInterval {
             remainder = 0
         }
+        if lastRatio != ratio {
+            // Leftovers are in the old ratio's units — not comparable.
+            remainder = 0
+            lastRatio = ratio
+        }
 
-        let value = Int(delta)
+        let value = Int(delta) * ratio.detents
         if remainder != 0, (remainder < 0) != (value < 0) {
             remainder = 0
         }
@@ -28,9 +54,8 @@ struct WheelDetentAccumulator {
         lastEventTime = eventTime
         remainder += value
 
-        let threshold = max(countsPerDetent, 1)
-        let detents = remainder / threshold
-        remainder -= detents * threshold
+        let detents = remainder / ratio.counts
+        remainder -= detents * ratio.counts
         return detents
     }
 }
@@ -57,9 +82,16 @@ final class ScrollEngine {
 
     /// From HIRES_WHEEL capabilities (typically 8): counts per ratchet notch.
     var hiresMultiplier: Double = 8
-    /// From THUMB_WHEEL getInfo: high-resolution counts per scroll detent.
-    /// MX Master 3S reports 120 while diverted.
-    var thumbDivertedRes: Double = 48
+    /// From THUMB_WHEEL getInfo (0x2150 fn 0x00): counts per *full revolution*
+    /// in native and diverted reporting. MX Master 3S reports 18 / 120, i.e.
+    /// 18 physical detents per turn and ~6.67 diverted counts per detent.
+    var thumbNativeRes = 18
+    var thumbDivertedRes = 120
+
+    /// Diverted counts that make up one physical thumb detent.
+    private var thumbCountsPerDetent: DetentRatio {
+        DetentRatio(counts: thumbDivertedRes, detents: thumbNativeRes)
+    }
 
     private var vertRemainder: Double = 0
     private var horizRemainder: Double = 0
@@ -79,7 +111,7 @@ final class ScrollEngine {
         guard deltaV != 0 else { return }
         let detents = verticalDetents.consume(
             delta: deltaV,
-            countsPerDetent: max(Int(hiresMultiplier.rounded()), 1)
+            countsPerDetent: DetentRatio(counts: Int(hiresMultiplier.rounded()))
         )
         guard detents != 0 else { return }
 
@@ -109,7 +141,7 @@ final class ScrollEngine {
         guard rotation != 0 else { return }
         let detents = thumbDetents.consume(
             delta: rotation,
-            countsPerDetent: max(Int(thumbDivertedRes.rounded()), 1)
+            countsPerDetent: thumbCountsPerDetent
         )
         guard detents != 0 else { return }
 
