@@ -7,6 +7,7 @@ final class ScrollEngineTests: XCTestCase {
         let engine = ScrollEngine { vertical, horizontal, _ in
             events.append((vertical, horizontal))
         }
+        engine.thumbNativeRes = 18
         engine.thumbDivertedRes = 120
 
         engine.injectThumb(rotation: 1)
@@ -14,19 +15,37 @@ final class ScrollEngineTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
     }
 
+    /// 120 diverted counts per revolution over 18 detents ≈ 6.67 counts each.
     func testOneThumbDetentPostsOneHorizontalScrollStep() {
         var events: [(vertical: Int32, horizontal: Int32)] = []
         let engine = ScrollEngine { vertical, horizontal, _ in
             events.append((vertical, horizontal))
         }
+        engine.thumbNativeRes = 18
         engine.thumbDivertedRes = 120
 
-        engine.injectThumb(rotation: 60)
-        engine.injectThumb(rotation: 60)
+        engine.injectThumb(rotation: 4)
+        engine.injectThumb(rotation: 4)
 
         XCTAssertEqual(events.count, 1)
         XCTAssertEqual(events.first?.vertical, 0)
         XCTAssertEqual(events.first?.horizontal, -40)
+    }
+
+    /// One physical revolution should scroll a revolution's worth of pixels,
+    /// not a single detent's.
+    func testFullThumbRevolutionPostsEveryDetent() {
+        var horizontal: Int32 = 0
+        let engine = ScrollEngine { _, h, _ in horizontal += h }
+        engine.thumbNativeRes = 18
+        engine.thumbDivertedRes = 120
+
+        // A revolution arrives as a stream of small hi-res deltas.
+        for _ in 0..<60 {
+            engine.injectThumb(rotation: 2)
+        }
+
+        XCTAssertEqual(horizontal, -720)
     }
 
     func testPartialMovementDoesNotProduceADetent() {

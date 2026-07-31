@@ -284,10 +284,11 @@ final class Daemon {
             scroll.hiresMultiplier = Double(caps.multiplier)
         }
         if capabilities.thumbWheel, let info = features.readThumbWheelInfo() {
-            scroll.thumbDivertedRes = Double(info.divertedRes)
-            // About fifteen intentional action detents per full revolution;
-            // scales with each device's reported diverted resolution.
-            thumbActionStep = max(1, info.divertedRes / 15)
+            scroll.thumbNativeRes = info.nativeRes
+            scroll.thumbDivertedRes = info.divertedRes
+            // One action per physical detent: nativeRes detents per revolution,
+            // divertedRes counts per revolution.
+            thumbActionStep = max(1, info.divertedRes / max(info.nativeRes, 1))
             DaemonLog.info("thumb res native=\(info.nativeRes) diverted=\(info.divertedRes)")
         }
         scroll.verticalSpeed = profile.scrollSpeed ?? 1.0
