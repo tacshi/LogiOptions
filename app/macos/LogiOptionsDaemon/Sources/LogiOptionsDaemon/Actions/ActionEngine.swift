@@ -15,7 +15,16 @@ enum MousePress: Equatable {
 
 /// Executes host-side actions (requires Accessibility for some paths).
 final class ActionEngine {
+    typealias ApplicationProcessRunner = (
+        _ name: String,
+        _ background: Bool,
+        _ completion: @escaping (Int32) -> Void
+    ) throws -> Void
+
     weak var features: DeviceFeaturesBox?
+
+    private let applicationProcessRunner: ApplicationProcessRunner
+    private let systemEventsKeyOverride: ((Int, Bool) -> Void)?
 
     /// Serial queue for System Events injects. NSAppleScript is not thread-safe;
     /// work stays off the HID/main path so gesture tracking is never blocked.
@@ -26,6 +35,14 @@ final class ActionEngine {
     /// Compiled scripts — avoids forking `/usr/bin/osascript` (~150 ms) per gesture.
     private var systemEventsScripts: [String: NSAppleScript] = [:]
     private var systemEventsWarmed = false
+
+    init(
+        applicationProcessRunner: ApplicationProcessRunner? = nil,
+        systemEventsKeyOverride: ((Int, Bool) -> Void)? = nil
+    ) {
+        self.applicationProcessRunner = applicationProcessRunner ?? Self.runApplicationProcess
+        self.systemEventsKeyOverride = systemEventsKeyOverride
+    }
 
     func execute(_ action: ActionSpec) {
         switch action {
@@ -460,16 +477,29 @@ final class ActionEngine {
     }
 
     private func openApp(name: String, background: Bool, fallback: (() -> Void)?) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        task.arguments = background ? ["-g", "-a", name] : ["-a", name]
         do {
-            try task.run()
+            try applicationProcessRunner(name, background) { status in
+                guard status != 0 else { return }
+                DaemonLog.warn("open \(name) exited with status \(status)")
+                fallback?()
+            }
             DaemonLog.info("open \(name)")
         } catch {
             DaemonLog.warn("open \(name) failed: \(error)")
             fallback?()
         }
+    }
+
+    private static func runApplicationProcess(
+        name: String,
+        background: Bool,
+        completion: @escaping (Int32) -> Void
+    ) throws {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = background ? ["-g", "-a", name] : ["-a", name]
+        task.terminationHandler = { completion($0.terminationStatus) }
+        try task.run()
     }
 
     /// Inject a key via System Events (session-level — same idea as Options+ agent).
@@ -482,6 +512,11 @@ final class ActionEngine {
         usingControl: Bool,
         completion: ((Bool, Double) -> Void)? = nil
     ) {
+        if let systemEventsKeyOverride {
+            systemEventsKeyOverride(code, usingControl)
+            completion?(true, 0)
+            return
+        }
         systemEventsQueue.async { [weak self] in
             guard let self else { return }
             let t0 = CACurrentMediaTime()
