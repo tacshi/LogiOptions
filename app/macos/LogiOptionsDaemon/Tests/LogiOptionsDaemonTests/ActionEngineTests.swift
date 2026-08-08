@@ -2,6 +2,29 @@
 import XCTest
 
 final class ActionEngineTests: XCTestCase {
+    func testMissionControlFallsBackWhenOpenProcessExitsNonZero() {
+        var launchedApplications: [(name: String, background: Bool)] = []
+        var fallbackKeys: [(code: Int, control: Bool)] = []
+        let engine = ActionEngine(
+            applicationProcessRunner: { name, background, completion in
+                launchedApplications.append((name, background))
+                completion(1)
+            },
+            systemEventsKeyOverride: { code, control in
+                fallbackKeys.append((code, control))
+            }
+        )
+
+        engine.execute(.system(id: "mission_control"))
+
+        XCTAssertEqual(launchedApplications.count, 1)
+        XCTAssertEqual(launchedApplications.first?.name, "Mission Control")
+        XCTAssertEqual(launchedApplications.first?.background, true)
+        XCTAssertEqual(fallbackKeys.count, 1)
+        XCTAssertEqual(fallbackKeys.first?.code, 126)
+        XCTAssertEqual(fallbackKeys.first?.control, true)
+    }
+
     func testFinderBackUsesHistoryShortcut() {
         XCTAssertEqual(
             ActionEngine.navigationAction(
